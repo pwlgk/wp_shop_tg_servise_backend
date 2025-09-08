@@ -1,0 +1,38 @@
+# fastapi-service/docker-compose.yml
+version: '3.8'
+
+services:
+  # PostgreSQL база данных для нашего сервисного слоя
+  postgres_db:
+    image: postgres:15
+    container_name: fastapi_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: 'fastapi_user'
+      POSTGRES_PASSWORD: 'your_strong_db_password' # Замените пароль!
+      POSTGRES_DB: 'fastapi_db'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Пробрасываем порт 5432 из контейнера на порт 5433 на нашей машине.
+      # Это сделано, чтобы не конфликтовать с локально установленным Postgres.
+      - '127.0.0.1:5433:5432'
+    networks:
+      - fastapi_network
+
+  # Redis для кеширования
+  redis_cache:
+    image: redis:7-alpine
+    container_name: fastapi_redis
+    restart: always
+    ports:
+      # Пробрасываем стандартный порт Redis на нашу машину
+      - '127.0.0.1:6379:6379'
+    networks:
+      - fastapi_network
+
+volumes:
+  postgres_data:
+
+networks:
+  fastapi_network:
