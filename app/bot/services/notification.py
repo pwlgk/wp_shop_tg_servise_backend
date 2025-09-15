@@ -85,45 +85,68 @@ async def ping_user(db: Session, user: User) -> bool:
             db.commit()
         return False
 
-def _format_order_details(order: Order) -> str:
-    """Вспомогательная функция для форматирования деталей заказа в текст."""
+def _format_order_details_for_user(order: Order) -> str: # <-- Переименовываем
+    """Вспомогательная функция для форматирования деталей заказа для КЛИЕНТА."""
     
-    # --- Получатель и контакты ---
     billing = order.billing
     recipient_name = f"{billing.first_name or ''} {billing.last_name or ''}".strip()
     recipient_lines = []
-    if recipient_name:
-        recipient_lines.append(f"<b>Получатель:</b> {recipient_name}")
-    if billing.phone:
-        recipient_lines.append(f"<b>Номер телефона:</b> {billing.phone}")
-    if billing.email:
-        recipient_lines.append(f"<b>Email:</b> {billing.email}")
+    if recipient_name: recipient_lines.append(f"<b>Получатель:</b> {recipient_name}")
+    if billing.phone: recipient_lines.append(f"<b>Номер телефона:</b> {billing.phone}")
+    if billing.email: recipient_lines.append(f"<b>Email:</b> {billing.email}")
     
-    # --- Состав заказа ---
     items_lines = ["<b>Состав заказа:</b>"]
     for item in order.line_items:
         items_lines.append(f"• {item.name} ({item.quantity} шт.) - {item.total} руб.")
         
-    # --- Собираем все вместе ---
     message_parts = [
         f"✅ Заказ №<b>{order.number}</b> успешно оформлен!\n",
         f"<b>Способ оплаты:</b> {order.payment_method_title}",
     ]
     message_parts.extend(recipient_lines)
     
-    # Добавляем пустую строку для разделения, если есть данные получателя
-    if recipient_lines:
-        message_parts.append("")
+    if recipient_lines: message_parts.append("")
         
     message_parts.extend(items_lines)
     message_parts.append(f"\n<b>Итоговая сумма: {order.total} руб.</b>")
     
-    # Добавляем финальное сообщение в зависимости от способа оплаты
-    if order.status == 'on-hold': # Это наш "Согласование с менеджером"
+    if order.status == 'on-hold':
         message_parts.append("\nСпасибо за ваш заказ! В ближайшее время с вами свяжется менеджер для подтверждения.")
     else:
         message_parts.append("\nСпасибо за ваш заказ!")
         
+    return "\n".join(message_parts)
+
+def _format_order_details_for_admin(order: Order) -> str:
+    """Форматирует детали заказа для АДМИНА (без "спасибо за заказ")."""
+    
+    billing = order.billing
+    recipient_name = f"{billing.first_name or ''} {billing.last_name or ''}".strip()
+    recipient_lines = []
+    if recipient_name: recipient_lines.append(f"<b>Получатель:</b> {recipient_name}")
+    if billing.phone: recipient_lines.append(f"<b>Номер телефона:</b> {billing.phone}")
+    if billing.email: recipient_lines.append(f"<b>Email:</b> {billing.email}")
+
+    items_lines = ["<b>Состав заказа:</b>"]
+    for item in order.line_items:
+        # Убираем лишние нули и добавляем символ рубля для админа
+        price_per_item = float(item.price)
+        total_item_price = float(item.total)
+        items_lines.append(f"• {item.name} ({item.quantity} шт.) - {total_item_price:,.0f} ₽")
+
+    total_order_price = float(order.total)
+    
+    message_parts = [
+        f"Заказ №<b>{order.number}</b>",
+        f"<b>Способ оплаты:</b> {order.payment_method_title}",
+    ]
+    message_parts.extend(recipient_lines)
+    
+    if recipient_lines: message_parts.append("")
+        
+    message_parts.extend(items_lines)
+    message_parts.append(f"\n<b>Итоговая сумма: {total_order_price:,.0f} ₽</b>")
+    
     return "\n".join(message_parts)
 
 
@@ -131,7 +154,7 @@ async def send_new_order_confirmation(db: Session, user: User, order: Order):
     """
     Уведомление о создании нового заказа (теперь принимает весь объект заказа).
     """
-    message = _format_order_details(order)
+    message = _format_order_details_for_user(order)
     await _send_message(db, user, message)
 async def send_order_cancellation_confirmation(db: Session, user: User, order_id: int):
     """Уведомление об отмене заказа."""
@@ -201,7 +224,7 @@ async def request_contact_from_user(db: Session, user: User, admin_name: str):
 
 async def send_new_order_to_admin(order: Order, customer: User):
     """Отправляет детали нового заказа в админский чат."""
-    message_text = _format_order_details(order)
+    message_text = _format_order_details_for_admin(order)
     
     # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
     # Берем ФИО из адреса (`billing`) самого заказа, а не из объекта User
