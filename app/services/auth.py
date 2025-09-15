@@ -1,29 +1,26 @@
-# app/services/auth.py
+from datetime import datetime, timedelta
 import json
+import logging
 import secrets
-from datetime import timedelta, datetime
-from typing import Dict, Any
-
-from fastapi import Depends, HTTPException, status
+from typing import Any, Dict
 import httpx
+from fastapi import Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 
 from app.clients.woocommerce import wc_client
 from app.core.config import settings
+from app.core.redis import redis_client
 from app.crud import user as crud_user
 from app.crud import referral as crud_referral
-# --- ИСПРАВЛЕНИЯ ЗДЕСЬ ---
 from app.crud import loyalty as crud_loyalty
-from app.services import settings as settings_service
-from app.bot.services import notification as notification_service
-from app.core.redis import redis_client
-# -------------------------
+from app.crud import notification as crud_notification
 from app.models.user import User
 from app.schemas.user import Token
 from app.utils.telegram import validate_init_data
 from app.db.session import SessionLocal
-import logging
+from app.services import settings as settings_service
+from app.bot.services import notification as bot_notification_service
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +47,11 @@ async def register_or_get_user(
     user_info: Dict[str, Any],
     referral_code: str | None = None
 ) -> User:
+    """
+    Основная логика регистрации/получения пользователя.
+    Регистрирует пользователя, создает реферальную связь и начисляет приветственный бонус.
+    Синхронизирует ФИО в локальную БД.
+    """
     telegram_id = user_info.get("id")
     if not telegram_id:
         raise ValueError("Telegram ID is missing in user_info")
@@ -57,69 +59,73 @@ async def register_or_get_user(
     db_user = crud_user.get_user_by_telegram_id(db, telegram_id=telegram_id)
 
     if db_user:
-        # Если пользователь уже есть в нашей БД, все в порядке.
         return db_user
 
-    # --- НОВАЯ УМНАЯ ЛОГИКА ---
-    # Пользователя нет в нашей БД. Попробуем создать его в WooCommerce.
-    logger.info(f"User with telegram_id {telegram_id} not found in local DB. Attempting to create/find in WooCommerce.")
+    logger.info(f"User with telegram_id {telegram_id} not found in local DB. Creating new user.")
+    
+    # Извлекаем ФИО заранее, чтобы использовать их в обоих местах
+    first_name = user_info.get("first_name", "")
+    last_name = user_info.get("last_name", "")
     
     try:
         new_wc_user_data = {
             "email": f"{telegram_id}@telegram.user",
             "username": str(telegram_id),
-            "first_name": user_info.get("first_name", ""),
-            "last_name": user_info.get("last_name", ""),
+            "first_name": first_name,
+            "last_name": last_name,
         }
         created_wc_user = await wc_client.post("wc/v3/customers", json=new_wc_user_data)
         wordpress_id = created_wc_user["id"]
-        
+
     except httpx.HTTPStatusError as e:
-        # Проверяем, не является ли ошибка "email уже существует"
-        if e.response.status_code == 400:
-            response_json = e.response.json()
-            if response_json.get("code") == "registration-error-email-exists":
-                logger.info("User already exists in WooCommerce. Attempting to sync.")
-                # Пользователь уже есть в WP! Найдем его по email.
-                existing_wc_user_response = await wc_client.get("wc/v3/customers", params={"email": f"{telegram_id}@telegram.user"})
-                existing_wc_users = existing_wc_user_response.json()
-                if existing_wc_users:
-                    wordpress_id = existing_wc_users[0]["id"]
-                else:
-                    # Очень странная ситуация, email есть, а найти не можем. Падаем.
-                    raise HTTPException(status_code=500, detail="User sync failed: WC user exists but could not be retrieved.")
+        if e.response.status_code == 400 and e.response.json().get("code") == "registration-error-email-exists":
+            logger.warning("User already exists in WooCommerce. Attempting to sync.")
+            existing_wc_user_response = await wc_client.get("wc/v3/customers", params={"email": f"{telegram_id}@telegram.user"})
+            existing_wc_users = existing_wc_user_response.json()
+            if existing_wc_users:
+                wordpress_id = existing_wc_users[0]["id"]
             else:
-                # Другая ошибка 400 от WooCommerce
-                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Could not create user in WordPress due to a client error.")
+                raise HTTPException(status_code=500, detail="User sync failed: WC user exists but could not be retrieved.")
         else:
-            # Любая другая ошибка (5xx, таймаут и т.д.)
+            logger.error(f"Failed to create user in WooCommerce: {e.response.text}", exc_info=True)
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Could not create user in WordPress.")
     
-    # К этому моменту у нас гарантированно есть wordpress_id, либо новый, либо найденный
-    
-    # Генерируем реферальный код
     new_referral_code = secrets.token_urlsafe(8)
     while crud_user.get_user_by_referral_code(db, code=new_referral_code):
         new_referral_code = secrets.token_urlsafe(8)
     
-    # Создаем пользователя в нашей БД
+    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+    # Передаем first_name и last_name в CRUD-функцию
     db_user = crud_user.create_user(
         db, telegram_id=telegram_id, wordpress_id=wordpress_id,
-        username=user_info.get("username"), referral_code=new_referral_code
+        username=user_info.get("username"),
+        referral_code=new_referral_code,
+        first_name=first_name,
+        last_name=last_name
     )
-    shop_settings = await settings_service.get_shop_settings(redis_client) # Нужен доступ к Redis
-    if shop_settings.is_welcome_bonus_active and shop_settings.welcome_bonus_amount > 0:
-        crud_loyalty.create_transaction(
-            db, user_id=db_user.id, points=shop_settings.welcome_bonus_amount, type="promo_welcome"
-        )
-        await notification_service.send_welcome_bonus(db, db_user, shop_settings.welcome_bonus_amount)
-    # 4. Если был передан код пригласившего, создаем реферальную связь
+
     if referral_code:
         referrer = crud_user.get_user_by_referral_code(db, code=referral_code)
-        # Проверяем, что реферер существует и пользователь не пригласил сам себя
         if referrer and referrer.id != db_user.id:
             crud_referral.create_referral(db, referrer_id=referrer.id, referred_id=db_user.id)
             logger.info(f"Referral link created: referrer_id={referrer.id} -> referred_id={db_user.id}")
+            
+            # Начисляем бонус новому пользователю (рефералу)
+            try:
+                shop_settings = await settings_service.get_shop_settings(redis_client)
+                bonus_amount = shop_settings.referral_welcome_bonus
+                if bonus_amount > 0:
+                    crud_loyalty.create_transaction(
+                        db, user_id=db_user.id, points=bonus_amount, type="promo_referral_welcome"
+                    )
+                    crud_notification.create_notification(
+                        db, user_id=db_user.id, type="points_earned",
+                        title=f"Вам начислен приветственный бонус!",
+                        message=f"Вы получили {bonus_amount} баллов за регистрацию по приглашению. Добро пожаловать!"
+                    )
+                    await bot_notification_service.send_welcome_bonus(db, db_user, bonus_amount)
+            except Exception as e:
+                logger.error(f"Failed to grant referral welcome bonus to user {db_user.id}", exc_info=True)
 
     return db_user
 

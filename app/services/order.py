@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 CANCELLABLE_STATUSES = {"pending", "on-hold"}
 
 
+
 async def create_order_from_cart(
     db: Session,
     redis: Redis,
@@ -31,20 +32,20 @@ async def create_order_from_cart(
 ) -> Order:
     """
     Создает заказ в WooCommerce на основе корзины пользователя.
-    Выполняет все проверки (наличие, баланс, мин. сумма) в рамках одной транзакции.
+    Выполняет все проверки: наличие, баланс баллов, % списания, мин. сумма.
     """
-    # 1. Получаем настройки и корзину
+    # 1. Получаем настройки магазина и содержимое корзины
     shop_settings = await settings_service.get_shop_settings(redis)
     cart_items_db = crud_cart.get_cart_items(db, user_id=current_user.id)
 
     if not cart_items_db:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Корзина пуста.")
 
+    # 2. ФИНАЛЬНАЯ ПРОВЕРКА НАЛИЧИЯ и расчет "чистой" стоимости товаров
     line_items_for_wc = []
     unavailable_items = []
     total_items_price = 0.0
 
-    # 2. ФИНАЛЬНАЯ ПРОВЕРКА НАЛИЧИЯ и расчет "чистой" стоимости товаров
     for item in cart_items_db:
         await redis.delete(f"product:{item.product_id}:user:{current_user.id}")
         await redis.delete(f"product:{item.product_id}")
@@ -71,23 +72,40 @@ async def create_order_from_cart(
         error_detail = "Некоторые товары закончились или их количество изменилось: " + ", ".join(unavailable_items)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error_detail)
 
-    # 3. ПРОВЕРКА МИНИМАЛЬНОЙ СУММЫ ЗАКАЗА
+    # 3. ПРОВЕРКА УСЛОВИЙ ОПЛАТЫ И ЗАКАЗА (ДО ТРАНЗАКЦИИ)
+
+    # 3.1 Проверка минимальной суммы заказа
     if total_items_price < shop_settings.min_order_amount:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Минимальная сумма заказа - {shop_settings.min_order_amount} руб."
         )
 
-    # 4. НАЧИНАЕМ ТРАНЗАКЦИЮ В НАШЕЙ БД
-    db.begin()
+    # 3.2 Проверка условий списания бонусов
+    if order_data.points_to_spend > 0:
+        # Проверяем максимальный процент списания
+        max_points_to_spend = total_items_price * (shop_settings.max_points_payment_percentage / 100)
+        if order_data.points_to_spend > max_points_to_spend:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Бонусами можно оплатить не более {int(max_points_to_spend)} ({shop_settings.max_points_payment_percentage}%) от стоимости товаров."
+            )
+        
+        # Проверяем, что на балансе достаточно баллов (эта проверка менее критична здесь,
+        # так как `spend_points` сделает это атомарно, но она обеспечивает быстрый отказ)
+        current_balance = loyalty_service.get_user_balance(db, current_user)
+        if order_data.points_to_spend > current_balance:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недостаточно бонусных баллов для списания.")
+
+    # 4. ОСНОВНАЯ ТРАНЗАКЦИЯ
+    db.begin_nested()
     try:
-        # Шаг 4.1: Атомарно списываем баллы, если нужно
+        # Шаг 4.1: Атомарно списываем баллы
         if order_data.points_to_spend > 0:
             loyalty_service.spend_points(
-                db,
-                user=current_user,
+                db, user=current_user,
                 points_to_spend=order_data.points_to_spend,
-                order_id_wc=0  # Временный ID, т.к. заказ еще не создан
+                order_id_wc=0
             )
 
         # Шаг 4.2: Формируем и отправляем заказ в WordPress
@@ -104,8 +122,7 @@ async def create_order_from_cart(
             "coupon_code": order_data.coupon_code
         }
         
-        created_order_data_wrapped = await wc_client.post("headless-api/v1/orders", json=order_payload)
-        created_order_data = created_order_data_wrapped['data']
+        created_order_data = await wc_client.post("headless-api/v1/orders", json=order_payload)
         new_order_id = created_order_data['id']
 
         # Шаг 4.3: Обновляем транзакцию списания реальным ID заказа
@@ -119,29 +136,23 @@ async def create_order_from_cart(
         # Шаг 4.4: Очищаем корзину
         crud_cart.clear_cart(db, user_id=current_user.id)
 
-        # Шаг 4.5: Если все прошло успешно, коммитим транзакцию в нашей БД
+        # Шаг 4.5: Коммитим транзакцию
         db.commit()
 
     except Exception as e:
-        # Если на любом шаге (списание, создание заказа) произошла ошибка,
-        # откатываем ВСЕ изменения в нашей БД (включая списание баллов).
         db.rollback()
-        logger.info(f"Transaction rolled back. Error creating order: {e}")
-        # Перевыбрасываем исключение, если это HTTPException, или создаем новое
+        logger.error(f"Transaction rolled back. Error creating order for user {current_user.id}", exc_info=True)
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Не удалось создать заказ.")
 
-    # 5. Валидация ответа и отправка уведомлений (после успешного коммита)
+    # 5. Валидация ответа и отправка уведомлений
     validated_order = Order.model_validate(created_order_data)
     
-    await notification_service.send_new_order_confirmation(
-        db, current_user, validated_order
-    )
+    await notification_service.send_new_order_confirmation(db, current_user, validated_order)
     await notification_service.send_new_order_to_admin(validated_order, current_user)
 
     return validated_order
-
 
 async def get_user_orders(
     current_user: User, 

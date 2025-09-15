@@ -158,44 +158,74 @@ async def get_stats_handler(message: Message):
         finally:
             db.close()
 
+
 @admin_actions_router.message(Command("find_user"))
 async def find_user_handler(message: Message):
-    query = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
-    if not query:
-        await message.answer("Пожалуйста, укажите ID, Telegram ID или username для поиска. Например: `/find_user 12345678`")
+    """
+    Ищет пользователя по ID, Telegram ID, username или ФИО.
+    Сначала ищет в быстрой локальной БД, затем (если нужно) в WooCommerce.
+    """
+    # 1. Парсим поисковый запрос от админа
+    try:
+        query = message.text.split(maxsplit=1)[1]
+    except IndexError:
+        await message.answer(
+            "Пожалуйста, укажите ID, Telegram ID, username или ФИО для поиска.\n"
+            "Например:\n"
+            "<code>/find_user 12345678</code>\n"
+            "<code>/find_user @username</code>\n"
+            "<code>/find_user Иван Петров</code>"
+        )
         return
-        
-    with get_db_context() as db:
-        try:
-            # 1. Сначала ищем в нашей быстрой БД по ID и username
-            users = crud_user.find_users(db, query)
-            
-            # 2. Если ничего не нашли, ищем в "медленном" WooCommerce по ФИО
-            if not users:
-                logger.info(f"No users found in local DB for '{query}'. Searching in WooCommerce...")
-                try:
-                    # API WC ищет по частичному совпадению в имени, фамилии, email
-                    wc_users_response = await wc_client.get("wc/v3/customers", params={"search": query})
-                    wc_users_data = wc_users_response.json()
-                    
-                    if wc_users_data:
-                        # Получаем telegram_id из email'ов (наш хак)
-                        telegram_ids = [int(u['email'].split('@')[0]) for u in wc_users_data if '@telegram.user' in u['email']]
-                        if telegram_ids:
-                            # Находим этих пользователей в нашей БД
-                            users = db.query(User).filter(User.telegram_id.in_(telegram_ids)).all()
-                except Exception as e:
-                    logger.error(f"Error searching users in WooCommerce: {e}")
 
-            if not users:
-                await message.answer("❌ Пользователи не найдены.")
-            else:
-                await message.answer(f"✅ Найдено пользователей: {len(users)}")
-                for user in users:
-                    card_text, builder = await admin_panel_service.format_user_card(user)
-                    await message.answer(card_text, reply_markup=builder.as_markup())
-        finally:
-            db.close()
+    await message.answer(f"🔍 Идет поиск по запросу: '{query}'...")
+
+    users = []
+    with get_db_context() as db:
+        # 2. Сначала ищем в нашей быстрой локальной БД
+        users = crud_user.find_users(db, query, limit=10)
+        
+        # 3. Если ничего не нашли и запрос не похож на ID/username, ищем в WooCommerce
+        if not users and not query.isdigit() and not query.startswith('@'):
+            try:
+                # API WC ищет по частичному совпадению в имени, фамилии, email
+                logger.info(f"No users found in local DB for '{query}'. Searching in WooCommerce...")
+                wc_users_response = await wc_client.get("wc/v3/customers", params={"search": query})
+                wc_users_data = wc_users_response.json()
+                
+                if wc_users_data:
+                    # Извлекаем telegram_id из email'ов (наш хак)
+                    telegram_ids = [
+                        int(u['email'].split('@')[0]) 
+                        for u in wc_users_data 
+                        if u.get('email') and '@telegram.user' in u['email']
+                    ]
+                    if telegram_ids:
+                        # Находим этих пользователей в нашей БД по списку ID
+                        users = db.query(User).filter(User.telegram_id.in_(telegram_ids)).limit(10).all()
+            except Exception as e:
+                logger.error(f"Error searching users in WooCommerce: {e}", exc_info=True)
+                await message.answer("Произошла ошибка при поиске в WooCommerce.")
+
+    # 4. Выводим результаты
+    if not users:
+        await message.answer("❌ Пользователи по вашему запросу не найдены.")
+    elif len(users) > 5:
+        # Если нашли слишком много, просим уточнить
+        user_list = "\n".join([f"• @{u.username}" or f"ID: {u.telegram_id}" for u in users])
+        await message.answer(
+            f"Найдено слишком много пользователей ({len(users)}). Пожалуйста, уточните запрос.\n\n"
+            f"Найденные совпадения:\n{user_list}"
+        )
+    else:
+        await message.answer(f"✅ Найдено пользователей: {len(users)}")
+        for user in users:
+            try:
+                card_text, builder = await admin_panel_service.format_user_card(user)
+                await message.answer(card_text, reply_markup=builder.as_markup())
+            except Exception as e:
+                logger.error(f"Error formatting user card for user {user.id}", exc_info=True)
+                await message.answer(f"Не удалось сформировать карточку для пользователя ID {user.id}.")
 
 # --- Хендлеры для блокировки с подтверждением ---
 

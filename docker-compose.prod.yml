@@ -1,0 +1,49 @@
+# docker-compose.prod.yml
+version: '3.8'
+
+services:
+  # Наш FastAPI сервис
+  api:
+    build: . # Собирать образ из Dockerfile в текущей директории
+    container_name: headless_api_service
+    restart: always
+    env_file:
+      - .env # Подключаем наши переменные окружения
+    volumes:
+      - ./app.log:/app/app.log # Пробрасываем файл лога на хост
+    depends_on:
+      - postgres_db
+      - redis_cache
+    networks:
+      - app_network
+
+  # База данных PostgreSQL
+  postgres_db:
+    image: postgres:15
+    container_name: headless_postgres_prod
+    restart: always
+    environment:
+      POSTGRES_USER: ${DATABASE_USER}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      POSTGRES_DB: ${DATABASE_NAME}
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    networks:
+      - app_network
+
+  # Кеш Redis
+  redis_cache:
+    image: redis:7-alpine
+    container_name: headless_redis_prod
+    restart: always
+    volumes:
+      - redis_data_prod:/data
+    networks:
+      - app_network
+
+volumes:
+  postgres_data_prod:
+  redis_data_prod:
+
+networks:
+  app_network:

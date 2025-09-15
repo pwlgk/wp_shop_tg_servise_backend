@@ -45,3 +45,7 @@ class StructuredPage(BaseModel):
     title: str
     image_url: HttpUrl | None = None # Изображение-обложка страницы
     blocks: List[PageBlock]
+
+
+class PromoWebhookPayload(BaseModel):
+    promo_id: int

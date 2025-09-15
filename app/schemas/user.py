@@ -1,4 +1,5 @@
 # app/schemas/user.py
+from datetime import date
 from pydantic import BaseModel, EmailStr, Field, model_validator
 from typing import Optional
 
@@ -66,6 +67,7 @@ class UserProfile(BaseModel):
     billing: AddressSchema
     shipping: AddressSchema
     counters: UserCounters
+    birth_date: date | None = None
     class Config:
         from_attributes = True
 
@@ -76,4 +78,5 @@ class UserUpdate(BaseModel):
     last_name: Optional[str] = None
     billing: Optional[AddressSchema] = None
     shipping: Optional[AddressSchema] = None
+    birth_date: date | None = None
 

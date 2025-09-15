@@ -105,3 +105,15 @@ def get_optional_current_user(
     
     user = db.query(User).filter(User.id == int(user_id)).first()
     return user # Вернет либо пользователя, либо None, если не найден
+
+def get_admin_user(current_user: User = Depends(get_current_user)) -> User:
+    """
+    Зависимость для защиты админских эндпоинтов.
+    Проверяет, является ли текущий пользователь администратором.
+    """
+    if current_user.telegram_id not in settings.ADMIN_TELEGRAM_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this resource."
+        )
+    return current_user

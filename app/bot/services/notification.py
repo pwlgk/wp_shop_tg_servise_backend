@@ -1,4 +1,5 @@
 # app/bot/services/notification.py
+import asyncio
 from sqlalchemy.orm import Session
 from aiogram.exceptions import TelegramForbiddenError
 from app.schemas.order import Order
@@ -9,7 +10,7 @@ from app.core.config import settings
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.models.user import User
 from aiogram.utils.keyboard import ReplyKeyboardBuilder # <-- Меняем импорт
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 import logging
 
 logger = logging.getLogger(__name__)
@@ -291,3 +292,148 @@ async def send_photo_to_user(db: Session, user: User, photo_id: str, caption: st
     except Exception as e:
         logger.error(f"Failed to send photo to user {user.id}: {e}")
         return False
+    
+async def send_points_expired_notification(db: Session, user: User, points_expired: int):
+    """Уведомление о сгорании бонусных баллов."""
+    message = (
+        f"🔥 К сожалению, срок действия ваших бонусных баллов истек.\n\n"
+        f"Списано: <b>{points_expired} баллов</b>.\n\n"
+        f"Совершайте покупки, чтобы накопить новые!"
+    )
+    await _send_message(db, user, message)
+
+async def send_points_expiring_soon_notification(db: Session, user: User, points_expiring: int, days_left: int):
+    """Уведомление о скором сгорании баллов."""
+    # Выбираем правильное склонение для слова "день"
+    day_word = "дней"
+    if days_left == 1:
+        day_word = "день"
+    elif 1 < days_left < 5:
+        day_word = "дня"
+
+    message = (
+        f"⏳ <b>Напоминание!</b>\n\n"
+        f"Через <b>{days_left} {day_word}</b> с вашего бонусного счета сгорит <b>{points_expiring} баллов</b>.\n\n"
+        f"Успейте потратить их на приятные покупки! 🎁"
+    )
+    # Можно добавить кнопку, ведущую в магазин
+    # builder = InlineKeyboardBuilder()
+    # builder.button(text="🛍️ Потратить баллы", web_app=...)
+    
+    await _send_message(db, user, message)
+
+
+async def send_promo_notification(
+    db: Session,
+    user: User,
+    title: str,
+    text: str,
+    image_url: str | None,
+    action_url: str | None
+):
+    """
+    Отправляет пользователю промо-уведомление (акцию).
+    Поддерживает отправку с картинкой и кнопкой-ссылкой в Mini App.
+    """
+    if not user.bot_accessible:
+        print(f"Skipping promo for user {user.id}: bot is marked as inaccessible.")
+        return
+
+    # --- 1. Формируем текст сообщения ---
+    # Объединяем заголовок и основной текст
+    full_text = f"<b>{title}</b>\n\n{text}"
+    
+    # Обрезаем текст, если он слишком длинный для подписи к фото (лимит Telegram 1024 символа)
+    if image_url and len(full_text) > 1024:
+        full_text = full_text[:1020] + "..."
+
+    # --- 2. Формируем инлайн-кнопку, если есть URL ---
+    reply_markup = None
+    if action_url:
+        builder = InlineKeyboardBuilder()
+        # Собираем полный URL для Mini App
+        full_action_url = f"{settings.MINI_APP_URL}{action_url}" if action_url.startswith('/') else action_url
+        
+        builder.button(
+            text="✨ Участвовать!",
+            web_app=WebAppInfo(url=full_action_url)
+        )
+        reply_markup = builder.as_markup()
+
+    # --- 3. Отправляем сообщение ---
+    try:
+        if image_url:
+            # Если есть картинка, отправляем как фото с подписью
+            await bot.send_photo(
+                chat_id=user.telegram_id,
+                photo=image_url,
+                caption=full_text,
+                reply_markup=reply_markup
+            )
+        else:
+            # Если картинки нет, отправляем как простое сообщение
+            await bot.send_message(
+                chat_id=user.telegram_id,
+                text=full_text,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True # Отключаем превью ссылок в тексте
+            )
+    except TelegramForbiddenError:
+        print(f"User {user.id} has blocked the bot while sending promo. Updating status.")
+        user.bot_accessible = False
+        db.add(user)
+        db.commit()
+    except Exception as e:
+        print(f"Failed to send promo notification to user {user.id}: {e}")
+
+
+async def send_error_to_super_admins(error_message: str):
+    """
+    Отправляет сообщение о критической ошибке всем супер-админам в личные сообщения.
+    """
+    if not settings.SUPER_ADMIN_IDS:
+        logger.warning("SUPER_ADMIN_IDS is not set. Critical error cannot be sent.")
+        return
+
+    # Используем asyncio.gather для параллельной отправки всем суперадминам
+    tasks = []
+    for admin_id in settings.SUPER_ADMIN_IDS:
+        try:
+            # Обрезаем сообщение, если оно слишком длинное (лимит Telegram 4096 символов)
+            if len(error_message) > 4096:
+                error_message = error_message[:4090] + "\n[...]"
+            
+            task = bot.send_message(
+                chat_id=admin_id,
+                text=error_message,
+                parse_mode="HTML"
+            )
+            tasks.append(task)
+        except Exception as e:
+            logger.error(f"Failed to create send_message task for super admin {admin_id}: {e}")
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True) # return_exceptions=True, чтобы не упасть, если один из админов заблокировал бота
+
+async def send_birthday_greeting(db: Session, user: User, points_added: int):
+    """Поздравляет пользователя с Днем Рождения."""
+    message = (
+        f"🎉 <b>С Днем Рождения, {user.first_name or 'дорогой друг'}!</b>\n\n"
+        f"Поздравляем вас с праздником! В этот особенный день мы хотим сделать вам подарок и начисляем "
+        f"<b>{points_added} бонусных баллов</b> на ваш счет.\n\n"
+        f"Желаем вам всего наилучшего и ждем в нашем магазине! 🥳"
+    )
+    await _send_message(db, user, message)
+
+async def send_manual_points_update(db: Session, user: User, points_adjusted: int, comment: str):
+    """Уведомление о ручном изменении баланса администратором."""
+    if points_adjusted > 0:
+        action_text = f"✅ Вам начислено <b>{points_adjusted} бонусных баллов</b>."
+    else:
+        # Убираем минус для красивого отображения
+        action_text = f"❌ С вашего счета списано <b>{-points_adjusted} бонусных баллов</b>."
+    
+    comment_text = f"<i>Комментарий администратора: {comment}</i>" if comment else ""
+    
+    message = f"{action_text}\n{comment_text}".strip()
+    await _send_message(db, user, message)

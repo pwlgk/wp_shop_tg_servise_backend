@@ -22,6 +22,7 @@ from app.models.cart import CartItem, FavoriteItem
 from app.models.loyalty import LoyaltyTransaction
 from app.models.referral import Referral
 from app.models.broadcast import Broadcast
+from app.models.notification import Notification
 
 # 4. Указываем Alembic на метаданные наших моделей
 target_metadata = Base.metadata

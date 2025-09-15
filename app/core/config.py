@@ -32,11 +32,21 @@ class Settings(BaseSettings):
     POINTS_LIFETIME_DAYS: int = 90
     ADMIN_TELEGRAM_IDS_STR: str = Field(alias="ADMIN_TELEGRAM_IDS")
     ADMIN_CHAT_ID: int
-    
+    WP_PROMO_WEBHOOK_SECRET: str
+    SHOP_SETTINGS_PAGE_ID: int
+
+    SUPER_ADMIN_IDS_STR: str = Field(alias="SUPER_ADMIN_IDS")
+
     @property
     def ADMIN_TELEGRAM_IDS(self) -> List[int]:
         return [int(admin_id.strip()) for admin_id in self.ADMIN_TELEGRAM_IDS_STR.split(',')]
 
+    @property
+    def SUPER_ADMIN_IDS(self) -> List[int]:
+        if not self.SUPER_ADMIN_IDS_STR:
+            return []
+        return [int(admin_id.strip()) for admin_id in self.SUPER_ADMIN_IDS_STR.split(',')]
+    
     # Это свойство будет автоматически парсить JSON в словарь
     LOYALTY_SETTINGS: Dict[str, Any] = {}
 

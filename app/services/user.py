@@ -1,3 +1,6 @@
+import logging
+from fastapi import HTTPException, status
+import httpx
 from sqlalchemy.orm import Session
 from app.clients.woocommerce import wc_client
 from app.models.user import User
@@ -7,6 +10,9 @@ from app.crud.cart import get_cart_items, get_favorite_items
 from app.services import user_levels as user_levels_service # <-- Импортируем
 from app.bot.services import notification as notification_service
 from app.services import loyalty as loyalty_service
+
+logger = logging.getLogger(__name__)
+
 async def get_user_profile(db: Session, current_user: User) -> UserProfile:
     """
     Получает полные данные пользователя, объединяя данные из нашей БД,
@@ -32,33 +38,63 @@ async def get_user_profile(db: Session, current_user: User) -> UserProfile:
         **wc_user_json, 
         "telegram_id": current_user.telegram_id,
         "username": current_user.username,
-        "counters": counters
+        "counters": counters,
+        "birth_date": current_user.birth_date, # <-- Добавляем
+
     }
     
     # 4. Валидируем и возвращаем результат
     return UserProfile.model_validate(profile_data)
-async def update_user_profile(current_user: User, user_update_data: UserUpdate) -> UserProfile:
+
+async def update_user_profile(db: Session, current_user: User, user_update_data: UserUpdate) -> UserProfile:
     """
-    Обновляет данные профиля пользователя в WooCommerce.
+    Обновляет данные профиля пользователя в WooCommerce и синхронизирует
+    ФИО с нашей локальной базой данных.
     """
-    # Преобразуем Pydantic-схему в словарь, исключая неустановленные значения
     update_data_dict = user_update_data.model_dump(exclude_unset=True)
     
     if not update_data_dict:
         # Если нечего обновлять, просто возвращаем текущий профиль
-        return await get_user_profile(current_user)
+        return await get_user_profile(db, current_user)
 
-    # Отправляем запрос на обновление в WooCommerce
-    updated_wc_user_data = await wc_client.post(f"wc/v3/customers/{current_user.wordpress_id}", json=update_data_dict)
+    try:
+        # 1. Отправляем запрос на обновление в WooCommerce
+        await wc_client.post(
+            f"wc/v3/customers/{current_user.wordpress_id}", 
+            json=update_data_dict
+        )
+    except httpx.HTTPStatusError as e:
+        error_message = "Не удалось обновить профиль в магазине."
+        if e.response.status_code == 400:
+            try:
+                error_details = e.response.json()
+                error_message = error_details.get("message", "Переданы неверные данные.")
+            except Exception:
+                pass
+        
+        logger.error(f"Failed to update WC user {current_user.wordpress_id}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_message)
+
+    # 2. СИНХРОНИЗИРУЕМ НАШУ БД
+    # Обновляем поля в нашем объекте User, если они были в запросе на обновление
+    updated_fields = []
+    if user_update_data.first_name is not None:
+        current_user.first_name = user_update_data.first_name
+        updated_fields.append("first_name")
+    if user_update_data.last_name is not None:
+        current_user.last_name = user_update_data.last_name
+        updated_fields.append("last_name")
+    if user_update_data.birth_date is not None:
+        current_user.birth_date = user_update_data.birth_date
+        updated_fields.append("birth_date")
     
-    # Собираем и возвращаем обновленный профиль
-    profile_data = {
-        "telegram_id": current_user.telegram_id,
-        "username": current_user.username,
-        **updated_wc_user_data
-    }
+    # Если были изменения, коммитим их в нашу БД
+    if updated_fields:
+        db.commit()
+        logger.info(f"Synced local user {current_user.id} fields: {', '.join(updated_fields)}")
     
-    return UserProfile.model_validate(profile_data)
+    # 3. После успешного обновления, запрашиваем свежие данные, чтобы вернуть их
+    return await get_user_profile(db, current_user)
 
 
 async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
@@ -66,7 +102,7 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
     Собирает ключевую информацию для "приборной панели" пользователя.
     """
     # --- 1. Получаем базовые данные из WooCommerce (только ФИО) ---
-    is_bot_accessible = await notification_service.ping_user(db, current_user)
+    #is_bot_accessible = await notification_service.ping_user(db, current_user)
 
     customer_data_response = await wc_client.get(f"wc/v3/customers/{current_user.wordpress_id}")
     customer_data = customer_data_response.json()
@@ -125,6 +161,5 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
         loyalty_progress=loyalty_progress,
         counters=counters,
         is_blocked=current_user.is_blocked,
-        is_bot_accessible=is_bot_accessible
-        
+        is_bot_accessible=current_user.bot_accessible        
     )

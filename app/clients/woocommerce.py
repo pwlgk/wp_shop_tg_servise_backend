@@ -6,17 +6,18 @@ import logging
 logger = logging.getLogger(__name__)
 class WooCommerceClient:
     def __init__(self, base_url: str, app_user: str, app_pass: str):
-        # Базовый URL теперь будет просто /wp-json/, так как мы обращаемся к разным неймспейсам
         self.base_url = f"{base_url}/wp-json"
+        self.auth = (app_user, app_pass)
         
-        # --- НОВЫЙ СПОСОБ АУТЕНТИФИКАЦИИ ---
-        # Basic Auth с именем пользователя и паролем приложения
-        self.auth = (app_user, app_pass) 
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Устанавливаем таймауты ---
+        # 30 секунд - более чем достаточный и безопасный таймаут для большинства операций
+        timeouts = httpx.Timeout(10.0, connect=30.0)
         
-        # Создаем асинхронный клиент httpx
-        # Он будет автоматически добавлять заголовок 'Authorization: Basic ...'
-        self.async_client = httpx.AsyncClient(auth=self.auth, base_url=self.base_url)
-
+        self.async_client = httpx.AsyncClient(
+            auth=self.auth, 
+            base_url=self.base_url,
+            timeout=timeouts # <-- Применяем новые таймауты
+        )
     async def get(self, endpoint: str, params: dict = None):
         try:
             # Теперь endpoint должен содержать полный путь от /wp-json/

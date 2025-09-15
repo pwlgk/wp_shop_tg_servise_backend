@@ -1,6 +1,8 @@
 # app/models/loyalty.py
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+
 
 from app.db.session import Base
 
@@ -17,6 +19,6 @@ class LoyaltyTransaction(Base):
     
     # ID заказа в WooCommerce, к которому привязана транзакция
     order_id_wc = Column(Integer, nullable=True, index=True)
-    
+    user = relationship("User")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=True) # Для сгораемых баллов

@@ -8,14 +8,16 @@ from app.services import catalog as catalog_service
 from app.schemas.cart import CartResponse, CartItemResponse, FavoriteResponse, CartStatusNotification
 from app.models.user import User
 from app.services import settings as settings_service # <-- Добавляем импорт
-
+from app.services import loyalty as loyalty_service
 
 async def get_user_cart(db: Session, redis: Redis, current_user: User) -> CartResponse:
     # --- 1. Получаем настройки магазина ---
     shop_settings = await settings_service.get_shop_settings(redis)
     
     cart_items_db = crud_cart.get_cart_items(db, user_id=current_user.id)
+    current_balance = loyalty_service.get_user_balance(db, current_user)
     
+
     response_items = []
     total_items_price = 0.0 # <-- Переименовываем
     notifications = []
@@ -71,14 +73,16 @@ async def get_user_cart(db: Session, redis: Redis, current_user: User) -> CartRe
             CartItemResponse(product=product_details, quantity=current_quantity)
         )
         total_items_price += float(product_details.price) * current_quantity
-
+    max_points_from_percentage = total_items_price * (shop_settings.max_points_payment_percentage / 100)
+    max_points_to_spend = int(min(current_balance, max_points_from_percentage))
     is_min_amount_reached = total_items_price >= shop_settings.min_order_amount
 
     return CartResponse(
         items=response_items, 
         total_items_price=round(total_items_price, 2), # <-- Переименовываем
         notifications=notifications,
-        min_order_amount=shop_settings.min_order_amount, # <-- Новое
+        min_order_amount=shop_settings.min_order_amount,
+        max_points_to_spend=max_points_to_spend,
         is_min_amount_reached=is_min_amount_reached # <-- Новое
     )
 

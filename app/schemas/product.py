@@ -2,6 +2,7 @@
 from pydantic import BaseModel
 from typing import Generic, List, TypeVar
 
+from .notification import Notification
 from app.schemas.order import Order
 
 class ProductCategory(BaseModel):
@@ -66,4 +67,7 @@ class PaginatedFavorites(PaginatedResponse[Product]):
     pass
 
 class PaginatedOrders(PaginatedResponse[Order]):
+    pass
+
+class PaginatedNotifications(PaginatedResponse[Notification]):
     pass

@@ -25,6 +25,7 @@ class CartResponse(BaseModel):
     # --- НОВЫЕ ПОЛЯ ---
     min_order_amount: float
     is_min_amount_reached: bool
+    max_points_to_spend: int
 
 # Схема для добавления/удаления товара из избранного
 class FavoriteItemUpdate(BaseModel):
