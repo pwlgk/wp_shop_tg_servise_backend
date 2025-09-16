@@ -8,7 +8,7 @@ from typing import Literal
 from app.dependencies import get_db, get_admin_user
 from app.models.user import User
 from app.schemas.admin import (
-    PaginatedAdminPromos, PaginatedAdminUsers, AdminUserDetails, AdminSendMessageRequest, 
+    PaginatedAdminOrders, PaginatedAdminPromos, PaginatedAdminUsers, AdminUserDetails, AdminSendMessageRequest, 
     AdminAdjustPointsRequest, BroadcastCreate
 )
 from app.crud import notification as crud_notification
@@ -173,20 +173,25 @@ def create_broadcast_task(
     
     return {"status": "accepted", "broadcast_id": new_broadcast.id}
 
-@router.get("/orders", response_model=PaginatedOrders)
+
+@router.get("/orders", response_model=PaginatedAdminOrders)
 async def get_orders_list(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
-    status: str | None = Query(None, description="Фильтр по статусу: pending, processing, on-hold, ..."),
-    search: str | None = Query(None, description="Поиск по номеру заказа, email или имени клиента")
+    
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+    status: str | None = Query(default=None, description="Фильтр по статусу: pending, processing, on-hold, ..."),
+    search: str | None = Query(default=None, description="Поиск по номеру заказа, email или имени клиента"),
+    # --------------------------
+
+    db: Session = Depends(get_db)
 ):
     """
-    [АДМИН] Возвращает пагинированный список всех заказов.
+    [АДМИН] Возвращает пагинированный список всех заказов в упрощенном формате.
     """
     filters = {"status": status, "search": search}
     active_filters = {k: v for k, v in filters.items() if v}
-    return await admin_service.get_paginated_orders(page, size, **active_filters)
-
+    return await admin_service.get_paginated_orders(db, page, size, **active_filters)
 
 
 @router.get("/settings", response_model=ShopSettings)

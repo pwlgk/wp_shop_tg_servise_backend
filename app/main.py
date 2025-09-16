@@ -5,7 +5,7 @@ import os
 import traceback
 import logging
 from contextlib import asynccontextmanager
-
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -128,6 +128,24 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan
 )
+
+origins = [
+    "http://localhost",
+    "http://localhost:3000", # для React/Vue
+    "http://localhost:8080",
+    "http://localhost:5173", # для Vite
+    "https://web.telegram.org",
+    config.MINI_APP_URL,
+    config.MINI_APP_URL_ADMIN
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins, # Разрешить запросы с этих доменов
+    allow_credentials=True, # Разрешить передачу cookie (если понадобится)
+    allow_methods=["*"],    # Разрешить все методы (GET, POST, PUT, DELETE и т.д.)
+    allow_headers=["*"],    # Разрешить все заголовки
+)
+
 
 # --- Регистрация обработчика исключений ---
 app.add_exception_handler(Exception, unhandled_exception_handler)

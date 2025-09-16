@@ -1,8 +1,8 @@
 # fastapi-service/.gitignore
 venv/
 __pycache__/
-.env
-.env.production
+.env*
+!.env.example
 *.pyc
 app.log
 *.bak

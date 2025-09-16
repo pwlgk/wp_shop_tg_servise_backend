@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     BASE_WEBHOOK_URL: str
     TELEGRAM_WEBHOOK_SECRET: str
     MINI_APP_URL: str
+    MINI_APP_URL_ADMIN: str
     
     @property
     def TELEGRAM_WEBHOOK_PATH(self) -> str:

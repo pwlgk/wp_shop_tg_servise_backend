@@ -14,7 +14,7 @@ from app.clients.woocommerce import wc_client
 from app.dependencies import get_db_context
 from app.models.user import User
 from app.schemas.admin import (
-    AdminPromoListItem, AdminUserListItem, PaginatedAdminPromos, PaginatedAdminUsers, AdminUserDetails
+    AdminOrderListItem, AdminPromoListItem, AdminUserListItem, PaginatedAdminOrders, PaginatedAdminPromos, PaginatedAdminUsers, AdminUserDetails
 )
 from app.schemas.cms import Banner
 from app.services import settings as settings_service
@@ -150,21 +150,14 @@ async def get_user_details(
     )
     return user_details
 
-async def get_paginated_orders(page: int, size: int, **filters) -> PaginatedOrders:
+async def get_paginated_orders(db: Session, page: int, size: int, **filters) -> PaginatedOrders:
+# -------------------------
     """
-    Собирает пагинированный список ВСЕХ заказов для админки
-    с поддержкой фильтров и поиска.
+    Собирает пагинированный и УПРОЩЕННЫЙ список всех заказов для админки.
     """
-    params = {
-        "page": page,
-        "per_page": size,
-    }
-
-    # Добавляем фильтры, если они есть
-    if filters.get("status"):
-        params["status"] = filters["status"]
-    if filters.get("search"):
-        params["search"] = filters["search"] # WC ищет по ID, email, имени клиента
+    params = { "page": page, "per_page": size }
+    if filters.get("status"): params["status"] = filters["status"]
+    if filters.get("search"): params["search"] = filters["search"]
 
     try:
         response = await wc_client.get("wc/v3/orders", params=params)
@@ -173,29 +166,46 @@ async def get_paginated_orders(page: int, size: int, **filters) -> PaginatedOrde
         total_pages = int(response.headers.get("X-WP-TotalPages", 0))
         orders_data = response.json()
         
-        CANCELLABLE_STATUSES = {"pending", "on-hold"}
+        items = []
         for order_dict in orders_data:
-            order_dict['can_be_cancelled'] = order_dict.get('status') in CANCELLABLE_STATUSES
-            # Добавляем telegram_id для удобства админа
             customer_id = order_dict.get("customer_id")
+            customer_display_name = "Гость"
+            customer_telegram_id = None
+            
             if customer_id:
-                # Этот вызов можно оптимизировать, если будет медленно
-                with get_db_context() as db: 
-                    user = crud_user.get_user_by_wordpress_id(db, customer_id)
-                    order_dict['customer_telegram_id'] = user.telegram_id if user else None
+                # --- ИЗМЕНЕНИЕ ЗДЕСЬ: используем переданный `db` ---
+                user = crud_user.get_user_by_wordpress_id(db, customer_id)
+                if user:
+                    customer_telegram_id = user.telegram_id
+                    customer_display_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.username or f"ID {user.telegram_id}"
 
-        validated_orders = [Order.model_validate(o) for o in orders_data]
-        
-        return PaginatedOrders(
+            # Формируем краткую сводку по товарам
+            line_items = order_dict.get("line_items", [])
+            items_summary_parts = [f"{item['name']} (x{item['quantity']})" for item in line_items]
+            items_summary = ", ".join(items_summary_parts)
+            # Обрезаем, если слишком длинная
+            if len(items_summary) > 70:
+                items_summary = items_summary[:67] + "..."
+
+            items.append(AdminOrderListItem(
+                id=order_dict["id"],
+                number=order_dict["number"],
+                status=order_dict["status"],
+                created_date=order_dict["date_created"],
+                total=order_dict["total"],
+                customer_display_name=customer_display_name,
+                customer_telegram_id=customer_telegram_id,
+                items_summary=items_summary
+            ))
+
+        return PaginatedAdminOrders(
             total_items=total_items, total_pages=total_pages,
-            current_page=page, size=size, items=validated_orders
+            current_page=page, size=size, items=items
         )
     except Exception as e:
         logger.error("Failed to fetch orders for admin panel", exc_info=True)
-        # Возвращаем пустой результат в случае ошибки, чтобы не ломать админку
-        return PaginatedOrders(total_items=0, total_pages=0, current_page=page, size=size, items=[])
+        return PaginatedAdminOrders(total_items=0, total_pages=0, current_page=page, size=size, items=[])
     
-
 async def get_current_shop_settings() -> ShopSettings:
     """Просто проксирует вызов к сервису настроек."""
     # Используем redis_client напрямую, так как он глобальный

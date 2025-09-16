@@ -60,3 +60,19 @@ class AdminPromoListItem(BaseModel):
 
 class PaginatedAdminPromos(PaginatedResponse[AdminPromoListItem]):
     pass
+
+
+class AdminOrderListItem(BaseModel):
+    id: int
+    number: str
+    status: str
+    created_date: datetime
+    total: str
+    
+    # --- Новые, "плоские" поля ---
+    customer_display_name: str
+    customer_telegram_id: int | None
+    items_summary: str # Краткий состав заказа, например, "Товар А x2, Товар Б x1"
+
+class PaginatedAdminOrders(PaginatedResponse[AdminOrderListItem]):
+    pass
