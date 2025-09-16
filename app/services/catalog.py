@@ -13,24 +13,60 @@ CACHE_TTL_SECONDS = 600  # 10 минут
 
 
 async def get_all_categories(redis: Redis) -> List[ProductCategory]:
-    """Получает список всех категорий товаров, используя кеш."""
-    cache_key = "categories:all"
+    """
+    Получает иерархический список всех категорий товаров, используя кеш.
+    """
+    cache_key = "categories:hierarchical:all" # Используем новый ключ кеша
     
     cached_categories = await redis.get(cache_key)
     if cached_categories:
         return [ProductCategory.model_validate(cat) for cat in json.loads(cached_categories)]
-        
-    response = await wc_client.get("wc/v3/products/categories", params={"hide_empty": True})
+            
+    # 1. Получаем ВСЕ категории плоским списком от WooCommerce
+    # `per_page=100` - чтобы получить все за один раз (увеличьте, если категорий больше)
+    response = await wc_client.get("wc/v3/products/categories", params={"per_page": 100, "hide_empty": True})
     categories_data = response.json()
     
-    categories = []
-    for cat in categories_data:
-        image_src = cat.get("image", {}).get("src") if cat.get("image") else None
-        categories.append(ProductCategory(id=cat['id'], name=cat['name'], slug=cat['slug'], image_src=image_src))
-        
-    await redis.set(cache_key, json.dumps([cat.model_dump() for cat in categories]), ex=CACHE_TTL_SECONDS)
+    # --- НОВАЯ ЛОГИКА ПОСТРОЕНИЯ ДЕРЕВА ---
     
-    return categories
+    # 2. Создаем словарь для быстрого доступа к категориям по ID и для хранения дочерних
+    categories_map = {}
+    root_categories = [] # Список для категорий верхнего уровня (у которых parent=0)
+
+    # Первый проход: создаем объекты Pydantic и раскладываем их по словарю
+    for cat_data in categories_data:
+        image_src = cat_data.get("image", {}).get("src") if cat_data.get("image") else None
+        category_obj = ProductCategory(
+            id=cat_data['id'],
+            name=cat_data['name'],
+            slug=cat_data['slug'],
+            image_src=image_src,
+            children=[] # Инициализируем пустым списком
+        )
+        categories_map[category_obj.id] = category_obj
+
+    # Второй проход: строим иерархию
+    for cat_data in categories_data:
+        category_id = cat_data['id']
+        parent_id = cat_data.get('parent', 0)
+        
+        current_category = categories_map[category_id]
+        
+        if parent_id == 0:
+            # Это категория верхнего уровня
+            root_categories.append(current_category)
+        elif parent_id in categories_map:
+            # Если родитель существует, добавляем текущую категорию в его `children`
+            parent_category = categories_map[parent_id]
+            parent_category.children.append(current_category)
+    
+    # -----------------------------------
+    
+    # Сохраняем в кеш уже древовидную структуру
+    # Pydantic v2 `model_dump` рекурсивно преобразует вложенные объекты
+    await redis.set(cache_key, json.dumps([cat.model_dump() for cat in root_categories]), ex=CACHE_TTL_SECONDS)
+    
+    return root_categories
 
 
 async def get_products(

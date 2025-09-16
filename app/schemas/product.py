@@ -1,6 +1,6 @@
 # app/schemas/product.py
 from pydantic import BaseModel
-from typing import Generic, List, TypeVar
+from typing import Generic, List, Optional, TypeVar
 
 from .notification import Notification
 from app.schemas.order import Order
@@ -9,7 +9,8 @@ class ProductCategory(BaseModel):
     id: int
     name: str
     slug: str
-    image_src: str | None = None
+    image_src: Optional[str] = None
+    children: List['ProductCategory'] = [] # <-- Добавляем поле для дочерних категорий
 
     class Config:
         from_attributes = True
