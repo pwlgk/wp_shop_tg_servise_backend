@@ -1,5 +1,4 @@
 # docker-compose.prod.yml
-version: '3.8'
 
 services:
   # Наш FastAPI сервис
@@ -16,6 +15,8 @@ services:
       - redis_cache
     networks:
       - app_network
+    ports:
+      - "127.0.0.1:8000:8000"
 
   # База данных PostgreSQL
   postgres_db:

@@ -1,0 +1,392 @@
+<?php
+// Этот код должен идти ПОСЛЕ стандартного кода вашей темы.
+
+// --- НАЧАЛО НАШЕГО КАСТОМНОГО КОДА ---
+
+/**
+ * Функция для регистрации нашего кастомного API-контроллера.
+ */
+function register_headless_api_routes() {
+    $controller = new Headless_API_Controller();
+    $controller->register_routes();
+}
+add_action('rest_api_init', 'register_headless_api_routes');
+
+/**
+ * Класс для создания кастомных REST API эндпоинтов для headless-магазина.
+ */
+class Head-less_API_Controller extends WP_REST_Controller {
+
+    protected $namespace = 'headless-api/v1';
+
+    public function register_routes() {
+        // Эндпоинт для создания заказов
+        register_rest_route($this->namespace, '/orders', array(
+            array(
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => array($this, 'create_order'),
+                'permission_callback' => '__return_true',
+            ),
+        ));
+        // Эндпоинт для обновления настроек
+        register_rest_route($this->namespace, '/settings', array(
+            array(
+                'methods'             => WP_REST_Server::EDITABLE,
+                'callback'            => array($this, 'update_settings'),
+                'permission_callback' => '__return_true',
+            ),
+        ));
+        // Эндпоинт для валидации купонов
+        register_rest_route($this->namespace, '/coupons/validate', array(
+            array(
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => array($this, 'validate_coupon'),
+                'permission_callback' => '__return_true',
+            ),
+        ));
+        // Эндпоинт для создания кастомных купонов
+        register_rest_route($this->namespace, '/coupons', array(
+            array(
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => array($this, 'create_coupon'),
+                'permission_callback' => '__return_true',
+            ),
+        ));
+    }
+
+    /**
+     * Валидирует купон и возвращает информацию о нем.
+     */
+    public function validate_coupon($request) {
+        $params = $request->get_json_params();
+        $coupon_code = isset($params['coupon_code']) ? wc_clean(wp_unslash($params['coupon_code'])) : '';
+        $cart_total = isset($params['cart_total']) ? (float)$params['cart_total'] : 0.0;
+
+        if (empty($coupon_code)) {
+            return new WP_Error('bad_request', 'Промокод не указан.', array('status' => 400));
+        }
+
+        $coupon = new WC_Coupon($coupon_code);
+
+        if (!$coupon->get_id()) {
+            return new WP_Error('invalid_coupon_code', 'Промокод не найден.', array('status' => 404));
+        }
+        
+        $validation_result = $coupon->is_valid();
+        if (is_wp_error($validation_result)) {
+             return new WP_Error('coupon_not_usable', $validation_result->get_error_message(), array('status' => 400));
+        }
+
+        $min_amount = (float) $coupon->get_minimum_amount();
+        if ($min_amount > 0 && $cart_total < $min_amount) {
+            $message = sprintf('Минимальная сумма для этого промокода: %s %s.', $min_amount, get_woocommerce_currency_symbol());
+            return new WP_Error('coupon_minimum_amount', $message, array('status' => 400));
+        }
+
+        $max_amount = (float) $coupon->get_maximum_amount();
+        if ($max_amount > 0 && $cart_total > $max_amount) {
+            $message = sprintf('Этот промокод не действует для заказов на сумму свыше %s %s.', $max_amount, get_woocommerce_currency_symbol());
+            return new WP_Error('coupon_maximum_amount', $message, array('status' => 400));
+        }
+
+        // --- ИСПРАВЛЕНИЕ: СОБИРАЕМ ОТВЕТ ВРУЧНУЮ ---
+        $response_data = array(
+            'id'                          => $coupon->get_id(),
+            'code'                        => $coupon->get_code(),
+            'amount'                      => $coupon->get_amount(),
+            'discount_type'               => $coupon->get_discount_type(),
+            'description'                 => $coupon->get_description(),
+            'date_expires'                => $coupon->get_date_expires() ? $coupon->get_date_expires()->format('c') : null,
+            'usage_count'                 => $coupon->get_usage_count(),
+            'individual_use'              => $coupon->get_individual_use(),
+            'product_ids'                 => $coupon->get_product_ids(),
+            'excluded_product_ids'        => $coupon->get_excluded_product_ids(),
+            'usage_limit'                 => $coupon->get_usage_limit(),
+            'usage_limit_per_user'        => $coupon->get_usage_limit_per_user(),
+            'limit_usage_to_x_items'      => $coupon->get_limit_usage_to_x_items(),
+            'free_shipping'               => $coupon->get_free_shipping(),
+            'product_categories'          => $coupon->get_product_categories(),
+            'excluded_product_categories' => $coupon->get_excluded_product_categories(),
+            'exclude_sale_items'          => $coupon->get_exclude_sale_items(),
+            'minimum_amount'              => $coupon->get_minimum_amount(),
+            'maximum_amount'              => $coupon->get_maximum_amount(),
+            'email_restrictions'          => $coupon->get_email_restrictions(),
+        );
+
+        return new WP_REST_Response($response_data, 200);
+    }
+
+    /**
+     * Создает кастомный купон (например, для рефералов).
+     */
+    public function create_coupon($request) {
+        $params = $request->get_json_params();
+        
+        if (empty($params['type']) || empty($params['amount'])) {
+            return new WP_Error('bad_request', 'Type and amount are required.', array('status' => 400));
+        }
+        
+        $code = !empty($params['code']) ? $params['code'] : 'REF_' . strtoupper(wp_generate_password(8, false));
+
+        $coupon_data = [
+            'code' => $code,
+            'discount_type' => sanitize_text_field($params['type']),
+            'amount' => sanitize_text_field($params['amount']),
+            'individual_use' => true,
+            'usage_limit' => 1,
+            'usage_limit_per_user' => 1,
+        ];
+        
+        if (!empty($params['email'])) {
+            $coupon_data['email_restrictions'] = [sanitize_email($params['email'])];
+        }
+        if (!empty($params['expires_in_days'])) {
+            $expiry_date = date('Y-m-d', strtotime('+' . absint($params['expires_in_days']) . ' days'));
+            $coupon_data['date_expires'] = $expiry_date;
+        }
+
+        $coupon = new WC_Coupon();
+        $coupon->set_props($coupon_data);
+        $coupon_id = $coupon->save();
+
+        if (is_wp_error($coupon_id)) {
+            return $coupon_id;
+        }
+
+        return new WP_REST_Response(['id' => $coupon_id, 'code' => $coupon->get_code()], 201);
+    }
+
+    /**
+     * Обновляет поля ACF на странице настроек.
+     */
+    public function update_settings($request) {
+        $settings_page_id = 329; // Убедитесь, что ID вашей страницы настроек верный
+        $params = $request->get_json_params();
+        $updated_fields = [];
+
+        if (isset($params['welcome_bonus_amount'])) {
+            update_field('welcome_bonus_amount', absint($params['welcome_bonus_amount']), $settings_page_id);
+            $updated_fields[] = 'welcome_bonus_amount';
+        }
+        if (isset($params['is_welcome_bonus_active'])) {
+            update_field('is_welcome_bonus_active', (bool)$params['is_welcome_bonus_active'], $settings_page_id);
+            $updated_fields[] = 'is_welcome_bonus_active';
+        }
+        // Добавьте сюда другие поля настроек при необходимости
+
+        if (empty($updated_fields)) {
+            return new WP_Error('bad_request', 'No valid fields to update.', array('status' => 400));
+        }
+
+        return new WP_REST_Response(['status' => 'ok', 'updated' => $updated_fields], 200);
+    }
+
+    /**
+     * Основная логика создания заказа.
+     */
+    public function create_order($request) {
+        $params = $request->get_json_params();
+
+        if (empty($params['customer_id']) || empty($params['line_items']) || empty($params['payment_method_id'])) {
+            return new WP_Error('bad_request', 'Customer ID, line items, and payment_method_id are required.', array('status' => 400));
+        }
+
+        try {
+            $order = new WC_Order();
+            $order->set_customer_id(absint($params['customer_id']));
+
+            foreach ($params['line_items'] as $item) {
+                $product = wc_get_product(absint($item['product_id']));
+                if ($product) {
+                    $order->add_product($product, absint($item['quantity']));
+                }
+            }
+
+            if (!empty($params['billing'])) {
+                $order->set_address($params['billing'], 'billing');
+            }
+            if (!empty($params['shipping'])) {
+                $order->set_address($params['shipping'], 'shipping');
+            }
+            
+            // ИСПРАВЛЕНО: Добавление доставки
+            if (!empty($params['shipping_lines'])) {
+                foreach($params['shipping_lines'] as $shipping_line_data) {
+                    $shipping_rate = new WC_Order_Item_Shipping();
+                    $shipping_rate->set_method_title($shipping_line_data['method_title']);
+                    $shipping_rate->set_method_id($shipping_line_data['method_id']);
+                    $shipping_rate->set_total($shipping_line_data['total']);
+                    $order->add_item($shipping_rate);
+                }
+            }
+
+            $payment_method_id = sanitize_text_field($params['payment_method_id']);
+            $payment_gateways = WC()->payment_gateways->payment_gateways();
+            if (isset($payment_gateways[$payment_method_id])) {
+                $order->set_payment_method($payment_gateways[$payment_method_id]);
+            } else {
+                return new WP_Error('invalid_payment_method', 'Invalid payment method specified.', array('status' => 400));
+            }
+            
+            $coupon_code = isset($params['coupon_code']) ? sanitize_text_field($params['coupon_code']) : null;
+            if (!empty($coupon_code)) {
+                $result = $order->apply_coupon($coupon_code);
+                if (is_wp_error($result)) {
+                    return new WP_Error('invalid_coupon', $result->get_error_message(), array('status' => 400));
+                }
+            }
+            
+            $points_to_spend = isset($params['points_to_spend']) ? absint($params['points_to_spend']) : 0;
+            if ($points_to_spend > 0) {
+                $coupon_code = 'POINTS_' . time() . '_' . $params['customer_id'];
+                $coupon = new WC_Coupon();
+                $coupon->set_code($coupon_code);
+                $coupon->set_discount_type('fixed_cart');
+                $coupon->set_amount($points_to_spend); // ИСПРАВЛЕНО: убрана опечатка
+                $coupon->set_individual_use(true);
+                $coupon->set_usage_limit(1);
+                $coupon->save();
+                $order->apply_coupon($coupon_code);
+            }
+
+            $order->calculate_totals();
+            $order_id = $order->save();
+
+            if (is_wp_error($order_id)) {
+                return $order_id;
+            }
+
+            $direct_payment_url = '';
+            $order_status = 'pending';
+
+            if ($payment_method_id === 'robokassa') {
+                $order_status = 'pending';
+                $robokassa_settings = get_option('woocommerce_robokassa_settings');
+                $merchant_login = $robokassa_settings['merchant_login'];
+                $password_1 = $robokassa_settings['password_1'];
+                $order_total = $order->get_total();
+                $order_description = "Оплата заказа №" . $order->get_order_number();
+                
+                $signature_value = "{$merchant_login}:{$order_total}:{$order_id}:{$password_1}";
+                $crc = md5($signature_value);
+
+                $payment_base_url = 'https://auth.robokassa.ru/Merchant/Index.aspx';
+                $payment_url_params = http_build_query([
+                    'MerchantLogin' => $merchant_login, 'OutSum' => $order_total,
+                    'InvId' => $order_id, 'Description' => $order_description,
+                    'SignatureValue' => $crc,
+                ]);
+                $direct_payment_url = $payment_base_url . '?' . $payment_url_params;
+
+            } elseif ($payment_method_id === 'cod') {
+                $order_status = 'on-hold';
+                $direct_payment_url = '';
+            }
+            
+            $order->update_status($order_status, 'Заказ создан через Headless API.');
+            $order->save();
+            
+            $data = $this->prepare_order_data_for_response($order);
+            $data['payment_url'] = $direct_payment_url;
+            
+            return new WP_REST_Response($data, 201);
+
+        } catch (Exception $e) {
+            return new WP_Error('order_creation_failed', $e->getMessage(), array('status' => 500));
+        }
+    }
+
+    /**
+     * Вспомогательная функция для ручной сборки ответа.
+     */
+    private function prepare_order_data_for_response($order) {
+        $line_items_data = [];
+        foreach ($order->get_items() as $item) {
+            $line_items_data[] = [
+                'product_id' => $item->get_product_id(),
+                'name'       => $item->get_name(),
+                'quantity'   => $item->get_quantity(),
+                'price'      => (string) ($item->get_total() / $item->get_quantity()),
+                'total'      => (string) $item->get_total(),
+            ];
+        }
+
+        $billing_address = $order->get_address('billing');
+    
+        if (empty($billing_address['first_name']) && $order->get_customer_id()) {
+            $billing_address['first_name'] = get_user_meta($order->get_customer_id(), 'first_name', true);
+        }
+        if (empty($billing_address['last_name']) && $order->get_customer_id()) {
+            $billing_address['last_name'] = get_user_meta($order->get_customer_id(), 'last_name', true);
+        }
+        
+        $customer_id = $order->get_customer_id();
+        $telegram_id = null;
+        if ($customer_id) {
+            $email = get_user_meta($customer_id, 'billing_email', true);
+            if (strpos($email, '@telegram.user') !== false) {
+                $telegram_id = (int)str_replace('@telegram.user', '', $email);
+            }
+        }
+        
+        return [
+            'id'                   => $order->get_id(),
+            'number'               => $order->get_order_number(),
+            'status'               => $order->get_status(),
+            'date_created'         => wc_rest_prepare_date_response($order->get_date_created()),
+            'total'                => (string) $order->get_total(),
+            'payment_method_title' => $order->get_payment_method_title(),
+            'billing'              => $billing_address,
+            'line_items'           => $line_items_data,
+            'customer_telegram_id' => $telegram_id
+        ];
+    }
+}
+
+
+/**
+ * Отправляет веб-хук в FastAPI при публикации акции.
+ */
+function trigger_promo_webhook_on_publish($post_id, $post, $update) {
+    if ($post->post_type !== 'promo' || $post->post_status !== 'publish') {
+        return;
+    }
+
+    $webhook_url = 'https://7d6d7fa8980a.ngrok-free.app/internal/webhooks/promo-created';
+    $secret = '5d2f20ec6eda4990cd61739ef81647e0e7e6b27ba877bd0881016ff5c11b39f6';
+
+    $body = json_encode(['promo_id' => $post_id]);
+    $args = array(
+        'body'        => $body,
+        'headers'     => array(
+            'Content-Type' => 'application/json',
+            'X-Webhook-Secret' => $secret
+        ),
+        'timeout'     => 15,
+        'blocking'    => false,
+    );
+
+    $response = wp_remote_post($webhook_url, $args);
+
+    if (is_wp_error($response)) {
+        error_log('Promo Webhook Error: ' . $response->get_error_message());
+    } else {
+        error_log('Promo Webhook Sent Successfully for promo ID: ' . $post_id);
+    }
+}
+add_action('save_post', 'trigger_promo_webhook_on_publish', 10, 3);
+
+
+/**
+ * Модифицирует аргументы регистрации CPT 'banner' для поддержки ACF.
+ */
+function modify_banner_cpt_args($args, $post_type) {
+    if ($post_type === 'banner') {
+        $args['show_in_rest'] = true;
+        if (!in_array('custom-fields', $args['supports'])) {
+            $args['supports'][] = 'custom-fields';
+        }
+    }
+    return $args;
+}
+add_filter('register_post_type_args', 'modify_banner_cpt_args', 10, 2);
