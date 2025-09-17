@@ -20,9 +20,14 @@ class CartStatusNotification(BaseModel):
 # Обновляем схему CartResponse
 class CartResponse(BaseModel):
     items: List[CartItemResponse]
-    total_items_price: float # <-- Переименовываем для ясности
+    total_items_price: float
+    
+    # --- НОВЫЕ ПОЛЯ ДЛЯ СКИДОК ---
+    discount_amount: float = 0.0
+    final_price: float # Итоговая цена (total_items_price - discount_amount)
+    # ----------------------------
+    
     notifications: List[CartStatusNotification]
-    # --- НОВЫЕ ПОЛЯ ---
     min_order_amount: float
     is_min_amount_reached: bool
     max_points_to_spend: int

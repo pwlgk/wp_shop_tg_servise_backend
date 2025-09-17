@@ -1,28 +1,32 @@
 # app/schemas/coupon.py
+
 from pydantic import BaseModel
-from typing import List, Literal, Optional
+from typing import Literal, List, Optional
+
+class LineItemForValidation(BaseModel):
+    """
+    Упрощенная структура товарной позиции, необходимая для
+    валидации купона на стороне WordPress.
+    """
+    product_id: int
+    quantity: int
+
 
 class CouponValidateRequest(BaseModel):
+    """
+    Схема для тела запроса на эндпоинт валидации купона.
+    """
     coupon_code: str
+    line_items: List[LineItemForValidation]
+
 
 class Coupon(BaseModel):
-    id: int
+    """
+    Схема для ответа от эндпоинта валидации.
+    Содержит основную информацию о купоне и рассчитанную сумму скидки.
+    """
     code: str
     amount: str
-    discount_type: str
+    discount_type: Literal["fixed_cart", "percent", "fixed_product"]
     description: str
-    date_expires: Optional[str] = None
-    usage_count: int
-    individual_use: bool
-    product_ids: List[int]
-    excluded_product_ids: List[int]
-    usage_limit: Optional[int]
-    usage_limit_per_user: Optional[int]
-    limit_usage_to_x_items: Optional[int]
-    free_shipping: bool
-    product_categories: List[int]
-    excluded_product_categories: List[int]
-    exclude_sale_items: bool
-    minimum_amount: str
-    maximum_amount: str
-    email_restrictions: List[str]
+    discount_amount: float
