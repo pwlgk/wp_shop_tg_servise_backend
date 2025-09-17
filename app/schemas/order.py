@@ -14,6 +14,7 @@ class OrderLineItem(BaseModel):
     # Мы ожидаем либо строку, либо число/дробное число
     price: Union[str, int, float]
     total: Union[str, int, float]
+    image_url: str | None = None # URL главного изображения товара
 
     # --- НОВЫЙ ВАЛИДАТОР ---
     # Этот валидатор будет приводить все числовые цены к строке
