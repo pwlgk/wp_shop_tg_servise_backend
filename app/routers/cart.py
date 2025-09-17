@@ -1,5 +1,6 @@
 # app/routers/cart.py
 
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from redis.asyncio import Redis
@@ -16,6 +17,7 @@ from app.crud import cart as crud_cart
 from app.services import cart as cart_service
 from app.services import catalog as catalog_service
 from app.core import locales
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -98,24 +100,46 @@ async def get_favorites(
 
 
 @router.post("/favorites/items")
-def add_favorite(
+async def add_favorite( # <-- Делаем эндпоинт асинхронным
     item_data: FavoriteItemUpdate,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    redis: Redis = Depends(get_redis_client) # <-- Добавляем Redis
 ):
     """Добавление товара в избранное."""
     crud_cart.add_favorite_item(db, user_id=current_user.id, product_id=item_data.product_id)
+    
+    # --- НОВАЯ ЛОГИКА: ИНВАЛИДАЦИЯ КЕША ---
+    # Мы не знаем, на какой странице каталога был этот товар,
+    # поэтому проще всего удалить все кешированные страницы каталога для этого пользователя.
+    # `product:*` - кеш для отдельных товаров, `products:*` - кеш для списков.
+    keys_to_delete = await redis.keys(f"product*user:{current_user.id}")
+    keys_to_delete += await redis.keys(f"products*user:{current_user.id}")
+    if keys_to_delete:
+        await redis.delete(*keys_to_delete)
+        logger.info(f"Cache invalidated for user {current_user.id} after adding to favorites.")
+    # ------------------------------------
+        
     return {"status": "ok", "message": locales.SUCCESS_ADDED_TO_FAVORITES}
 
-
 @router.delete("/favorites/items/{product_id}")
-def remove_favorite(
+async def remove_favorite( # <-- Делаем эндпоинт асинхронным
     product_id: int,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    redis: Redis = Depends(get_redis_client) # <-- Добавляем Redis
 ):
     """Удаление товара из избранного."""
     success = crud_cart.remove_favorite_item(db, user_id=current_user.id, product_id=product_id)
     if not success:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=locales.ERROR_ITEM_NOT_IN_FAVORITES)
+        
+    # --- НОВАЯ ЛОГИКА: ИНВАЛИДАЦИЯ КЕША ---
+    keys_to_delete = await redis.keys(f"product*user:{current_user.id}")
+    keys_to_delete += await redis.keys(f"products*user:{current_user.id}")
+    if keys_to_delete:
+        await redis.delete(*keys_to_delete)
+        logger.info(f"Cache invalidated for user {current_user.id} after removing from favorites.")
+    # ------------------------------------
+
     return {"status": "ok", "message": locales.SUCCESS_REMOVED_FROM_FAVORITES}
