@@ -10,6 +10,7 @@ from app.crud.cart import get_cart_items, get_favorite_items
 from app.services import user_levels as user_levels_service # <-- Импортируем
 from app.bot.services import notification as notification_service
 from app.services import loyalty as loyalty_service
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
@@ -51,21 +52,32 @@ async def get_user_profile(db: Session, current_user: User) -> UserProfile:
 async def update_user_profile(db: Session, current_user: User, user_update_data: UserUpdate) -> UserProfile:
     """
     Обновляет данные профиля пользователя в WooCommerce и синхронизирует
-    ФИО с нашей локальной базой данных.
+    ФИО и дату рождения с нашей локальной базой данных.
     """
+    # 1. Создаем словарь из данных, которые пришли от фронтенда
     update_data_dict = user_update_data.model_dump(exclude_unset=True)
     
+    # Если фронтенд не прислал никаких данных для обновления, выходим
     if not update_data_dict:
-        # Если нечего обновлять, просто возвращаем текущий профиль
         return await get_user_profile(db, current_user)
+        
+    # 2. Преобразуем объект `date` в строку формата YYYY-MM-DD перед отправкой в JSON
+    if 'birth_date' in update_data_dict and update_data_dict['birth_date'] is not None:
+        # Проверяем, что это действительно объект date, на всякий случай
+        if isinstance(update_data_dict['birth_date'], date):
+            update_data_dict['birth_date'] = update_data_dict['birth_date'].isoformat()
 
     try:
-        # 1. Отправляем запрос на обновление в WooCommerce
+        # 3. Отправляем запрос на обновление в WooCommerce
+        # `httpx` сам сериализует наш словарь в JSON
         await wc_client.post(
             f"wc/v3/customers/{current_user.wordpress_id}", 
             json=update_data_dict
         )
+        logger.info(f"Successfully updated user {current_user.id} profile in WooCommerce.")
+
     except httpx.HTTPStatusError as e:
+        # 4. Обрабатываем возможные ошибки от WooCommerce
         error_message = "Не удалось обновить профиль в магазине."
         if e.response.status_code == 400:
             try:
@@ -77,8 +89,9 @@ async def update_user_profile(db: Session, current_user: User, user_update_data:
         logger.error(f"Failed to update WC user {current_user.wordpress_id}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_message)
 
-    # 2. СИНХРОНИЗИРУЕМ НАШУ БД
-    # Обновляем поля в нашем объекте User, если они были в запросе на обновление
+    # 5. СИНХРОНИЗИРУЕМ НАШУ ЛОКАЛЬНУЮ БД
+    # Здесь мы используем исходный объект `user_update_data`, где `birth_date`
+    # все еще является объектом `date`, который SQLAlchemy понимает.
     updated_fields = []
     if user_update_data.first_name is not None:
         current_user.first_name = user_update_data.first_name
@@ -95,9 +108,8 @@ async def update_user_profile(db: Session, current_user: User, user_update_data:
         db.commit()
         logger.info(f"Synced local user {current_user.id} fields: {', '.join(updated_fields)}")
     
-    # 3. После успешного обновления, запрашиваем свежие данные, чтобы вернуть их
+    # 6. После успешного обновления, запрашиваем свежие данные, чтобы вернуть их фронтенду
     return await get_user_profile(db, current_user)
-
 
 async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
     """
