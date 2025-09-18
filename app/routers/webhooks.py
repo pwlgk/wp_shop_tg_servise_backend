@@ -172,6 +172,10 @@ async def check_and_reward_referrer(db: Session, referred_user: User):
         db.add(referral_link)
         db.commit()
 
+IGNORED_ORDER_STATUSES_FOR_USER_NOTIFICATION = {
+    "checkout-draft", # Технический статус для черновиков
+    "trash"           # Заказ удален в корзину
+}
 
 @wc_router.post("/order-updated", dependencies=[Depends(verify_webhook_signature)])
 async def order_updated_webhook(request: Request, db: Session = Depends(get_db)):
@@ -195,19 +199,24 @@ async def order_updated_webhook(request: Request, db: Session = Depends(get_db))
         return {"status": "ok", "message": "User not found"}
 
     try:
-        is_just_created_webhook = not order_data.get("date_paid_gmt") and order_status in ['pending', 'on-hold']
 
-        if not is_just_created_webhook:
-            status_title = ORDER_STATUS_MAP.get(order_status, order_status.capitalize())
-            await bot_notification_service.send_order_status_update(db, user, order_id, status_title)
-            crud_notification.create_notification(
-                    db=db,
-                    user_id=user.id,
-                    type="order_status_update",
-                    title=f"Статус заказа №{order_id} обновлен",
-                    message=f"Новый статус вашего заказа: {status_title}.",
-                    related_entity_id=str(order_id)
-                )
+        if order_status in IGNORED_ORDER_STATUSES_FOR_USER_NOTIFICATION:
+            logger.info(f"Order {order_id} status changed to '{order_status}', which is in the ignored list. Skipping user notification.")
+        
+        else:
+            is_just_created_webhook = not order_data.get("date_paid_gmt") and order_status in ['pending', 'on-hold']
+
+            if not is_just_created_webhook:
+                status_title = ORDER_STATUS_MAP.get(order_status, order_status.capitalize())
+                await bot_notification_service.send_order_status_update(db, user, order_id, status_title)
+                crud_notification.create_notification(
+                        db=db,
+                        user_id=user.id,
+                        type="order_status_update",
+                        title=f"Статус заказа №{order_id} обновлен",
+                        message=f"Новый статус вашего заказа: {status_title}.",
+                        related_entity_id=str(order_id)
+                    )
         if order_status == "completed":
             order_total = float(order_data.get("total", "0"))
             points_added = loyalty_service.add_cashback_for_order(db, user, order_total, order_id)

@@ -20,17 +20,21 @@ class CartStatusNotification(BaseModel):
 # Обновляем схему CartResponse
 class CartResponse(BaseModel):
     items: List[CartItemResponse]
-    total_items_price: float
     
-    # --- НОВЫЕ ПОЛЯ ДЛЯ СКИДОК ---
-    discount_amount: float = 0.0
-    final_price: float # Итоговая цена (total_items_price - discount_amount)
-    # ----------------------------
+    # --- Основные расчеты ---
+    total_items_price: float # "Чистая" стоимость товаров
+    discount_amount: float = 0.0   # Сумма скидки от промокода
+    final_price: float         # Итоговая цена (total_items_price - discount_amount)
     
+    # --- Информация для пользователя ---
     notifications: List[CartStatusNotification]
     min_order_amount: float
     is_min_amount_reached: bool
-    max_points_to_spend: int
+    max_points_to_spend: int # Макс. кол-во баллов для списания (считается от final_price)
+    
+    # --- Информация о примененном купоне ---
+    applied_coupon_code: str | None = None
+
 
 # Схема для добавления/удаления товара из избранного
 class FavoriteItemUpdate(BaseModel):

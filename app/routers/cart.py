@@ -1,7 +1,7 @@
 # app/routers/cart.py
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from redis.asyncio import Redis
 
@@ -26,13 +26,18 @@ router = APIRouter()
 
 @router.get("/cart", response_model=CartResponse)
 async def get_cart(
+    # --- НОВЫЙ ПАРАМЕТР ---
+    coupon_code: str | None = Query(None, description="Промокод для расчета скидки"),
+    # ---------------------
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     redis: Redis = Depends(get_redis_client)
 ):
-    """Получение содержимого корзины текущего пользователя."""
-    return await cart_service.get_user_cart(db, redis, current_user)
-
+    """
+    Получение содержимого корзины текущего пользователя.
+    Опционально принимает промокод для расчета скидок.
+    """
+    return await cart_service.get_user_cart(db, redis, current_user, coupon_code)
 
 @router.post("/cart/items")
 async def update_cart_item(

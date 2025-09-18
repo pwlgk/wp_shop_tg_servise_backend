@@ -1,6 +1,8 @@
 # app/services/cart.py
 
 import logging
+import math
+from typing import Optional
 from sqlalchemy.orm import Session
 from redis.asyncio import Redis
 from fastapi import HTTPException
@@ -10,10 +12,11 @@ from app.services import catalog as catalog_service
 from app.services import settings as settings_service
 from app.services import loyalty as loyalty_service
 from app.services import coupon as coupon_service
-from app.schemas.cart import CartResponse, CartItemResponse, FavoriteResponse, CartStatusNotification
+from app.schemas.cart import (
+    CartResponse, CartItemResponse, FavoriteResponse, CartStatusNotification
+)
 from app.schemas.product import PaginatedFavorites
 from app.models.user import User
-import math
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +44,9 @@ async def get_user_cart(
     # 2. "Самоисцеление" корзины и расчет "чистой" стоимости
     if cart_items_db:
         for item in cart_items_db:
-            product_details = await catalog_service.get_product_by_id(db, redis, item.product_id, current_user.id)
+            product_details = await catalog_service.get_product_by_id(
+                db, redis, item.product_id, current_user.id
+            )
             
             if not product_details or product_details.stock_status != 'instock' or (product_details.stock_quantity is not None and product_details.stock_quantity == 0):
                 crud_cart.remove_cart_item(db, user_id=current_user.id, product_id=item.product_id)
@@ -63,28 +68,34 @@ async def get_user_cart(
             response_items.append(CartItemResponse(product=product_details, quantity=current_quantity))
             total_items_price += float(product_details.price) * current_quantity
 
-    # 3. Применение купона, если он передан
+    # 3. Применение купона, если он передан и корзина не пуста
     discount_amount = 0.0
+    applied_coupon_code = None
     if coupon_code and response_items:
         try:
             line_items_for_validation = [{"product_id": item.product.id, "quantity": item.quantity} for item in response_items]
-            validated_coupon = await coupon_service.validate_coupon(coupon_code, line_items_for_validation)
+            # --- ИСПРАВЛЕНИЕ: Передаем `current_user` в сервис валидации ---
+            validated_coupon = await coupon_service.validate_coupon(
+                current_user, coupon_code, line_items_for_validation
+            )
             discount_amount = validated_coupon.discount_amount
+            applied_coupon_code = validated_coupon.code
+            
             notifications.append(CartStatusNotification(
                 level="success",
-                message=f"Промокод '{coupon_code.upper()}' успешно применен! Скидка: {discount_amount} руб."
+                message=f"Промокод '{validated_coupon.code.upper()}' успешно применен! Скидка: {discount_amount} руб."
             ))
         except HTTPException as e:
-            # Если купон невалиден, добавляем уведомление об ошибке
             notifications.append(CartStatusNotification(level="error", message=e.detail))
 
-    # 4. Расчет максимального количества баллов для списания
-    current_balance = loyalty_service.get_user_balance(db, current_user)
-    max_points_from_percentage = total_items_price * (shop_settings.max_points_payment_percentage / 100)
-    max_points_to_spend = int(min(current_balance, max_points_from_percentage))
-
-    # 5. Финальные расчеты
+    # 4. Финальные расчеты
     final_price = total_items_price - discount_amount
+    final_price = max(final_price, 0)
+    
+    current_balance = loyalty_service.get_user_balance(db, current_user)
+    max_points_from_percentage = final_price * (shop_settings.max_points_payment_percentage / 100)
+    max_points_to_spend = int(min(current_balance, max_points_from_percentage))
+    
     is_min_amount_reached = total_items_price >= shop_settings.min_order_amount
 
     return CartResponse(
@@ -95,7 +106,8 @@ async def get_user_cart(
         notifications=notifications,
         min_order_amount=shop_settings.min_order_amount,
         is_min_amount_reached=is_min_amount_reached,
-        max_points_to_spend=max_points_to_spend
+        max_points_to_spend=max_points_to_spend,
+        applied_coupon_code=applied_coupon_code
     )
 
 
