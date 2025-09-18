@@ -33,7 +33,7 @@ async def format_user_card(user: User) -> tuple[str, InlineKeyboardBuilder]:
     card_text = (
         f"👤 <b>Карточка пользователя</b>\n\n"
         f"<b>ID:</b> <code>{user.id}</code> (TG ID: <code>{user.telegram_id}</code>)\n"
-        # f"<b>Имя:</b> {full_name or '<i>не указано</i>'}\n"
+        f"<b>Телефон:</b> <code>{user.phone or 'не указан'}</code>\n" # <-- Добавляем
         f"<b>Имя:</b> {display_name}\n"
 
         f"<b>Username:</b> @{user.username or '<i>не указан</i>'}\n"

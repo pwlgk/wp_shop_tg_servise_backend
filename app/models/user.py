@@ -28,3 +28,4 @@ class User(Base):
     # Кого пригласил этот пользователь
     referrals = relationship("Referral", foreign_keys="Referral.referrer_id", back_populates="referrer")
     birth_date = Column(Date, nullable=True) # Храним только дату, без времени
+    phone = Column(String, nullable=True)

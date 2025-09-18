@@ -67,6 +67,8 @@ class UserProfile(BaseModel):
     billing: AddressSchema
     shipping: AddressSchema
     counters: UserCounters
+    phone: str | None = None # <-- Добавляем сюда
+
     birth_date: date | None = None
     class Config:
         from_attributes = True

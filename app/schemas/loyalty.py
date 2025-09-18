@@ -40,3 +40,4 @@ class UserDashboard(BaseModel):
     has_active_orders: bool
     loyalty_progress: LoyaltyProgress
     counters: UserCounters
+    phone: str | None = None

@@ -40,6 +40,8 @@ async def get_user_profile(db: Session, current_user: User) -> UserProfile:
         "username": current_user.username,
         "counters": counters,
         "birth_date": current_user.birth_date, # <-- Добавляем
+        "phone": current_user.phone, # <-- Добавляем
+
 
     }
     
@@ -160,6 +162,8 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
         has_active_orders=has_active_orders,
         loyalty_progress=loyalty_progress,
         counters=counters,
+        phone=current_user.phone, # <-- Добавляем
+
         is_blocked=current_user.is_blocked,
         is_bot_accessible=current_user.bot_accessible        
     )

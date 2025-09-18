@@ -154,3 +154,10 @@ def get_users_with_birthday_today(db: Session) -> list[User]:
 def get_user_by_wordpress_id(db: Session, wordpress_id: int) -> User | None:
     """Получает пользователя по его ID из WordPress."""
     return db.query(User).filter(User.wordpress_id == wordpress_id).first()
+
+def update_user_phone(db: Session, user: User, phone: str) -> User:
+    """Обновляет номер телефона пользователя в локальной БД."""
+    user.phone = phone
+    db.commit()
+    db.refresh(user)
+    return user
