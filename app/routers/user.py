@@ -31,13 +31,15 @@ async def read_users_me(
 @router.put("/users/me", response_model=UserProfile)
 async def update_users_me(
     user_update_data: UserUpdate,
+    db: Session = Depends(get_db), # <-- Убедитесь, что эта зависимость есть
     current_user: User = Depends(get_current_user)
 ):
     """
     Обновление информации о текущем авторизованном пользователе.
     """
-    return await user_service.update_user_profile(current_user, user_update_data)
-
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+    # Передаем все три необходимых аргумента
+    return await user_service.update_user_profile(db, current_user, user_update_data)
 
 @router.get("/users/me/balance", response_model=UserBalanceResponse)
 def get_user_balance(
