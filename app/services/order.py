@@ -172,7 +172,7 @@ async def get_user_orders(
         "customer": current_user.wordpress_id,
         "page": page,
         "per_page": size,
-        "exclude_status": "checkout-draft,trash" 
+        "exclude_status": "checkout-draft" 
 
     }
     
