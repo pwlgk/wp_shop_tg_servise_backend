@@ -24,6 +24,7 @@ class Product(BaseModel):
     id: int
     name: str
     slug: str
+    sku: str | None = ""
     price: str
     regular_price: str
     sale_price: str

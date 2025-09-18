@@ -1,5 +1,5 @@
 # app/routers/order.py
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from redis.asyncio import Redis
 from typing import List, Optional
@@ -63,3 +63,20 @@ async def cancel_user_order(
     current_user: User = Depends(get_current_user)
 ):
     return await order_service.cancel_order(db, order_id, current_user) # <-- Передаем db
+
+
+@router.get("/orders/{order_id}", response_model=Order)
+async def get_single_order(
+    order_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Получение детальной информации о конкретном заказе.
+    """
+    order_details = await order_service.get_order_details(order_id, current_user)
+    if not order_details:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Заказ не найден или у вас нет прав на его просмотр."
+        )
+    return order_details

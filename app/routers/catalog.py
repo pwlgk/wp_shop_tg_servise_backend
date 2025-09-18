@@ -29,10 +29,11 @@ async def get_all_products(
     page: int = Query(1, ge=1, description="Номер страницы"),
     size: int = Query(20, ge=1, le=100, description="Количество товаров на странице"),
     
-    # Параметры фильтрации
+    # Параметры фильтрации и поиска
+    sku: Optional[str] = Query(None, description="Поиск товара по точному артикулу (SKU)"),
     category: Optional[int] = Query(None, description="ID категории для фильтрации"),
     tag: Optional[int] = Query(None, description="ID метки (тега) для фильтрации"),
-    search: Optional[str] = Query(None, description="Поисковый запрос"),
+    search: Optional[str] = Query(None, description="Поисковый запрос по названию/описанию"),
     min_price: Optional[float] = Query(None, ge=0, description="Минимальная цена"),
     max_price: Optional[float] = Query(None, ge=0, description="Максимальная цена"),
     
@@ -51,6 +52,7 @@ async def get_all_products(
     """
     Получение списка товаров с пагинацией, фильтрацией, поиском и сортировкой.
     Если пользователь авторизован, товары будут помечены флагом is_favorite.
+    Поиск по SKU имеет приоритет над поиском по тексту.
     """
     user_id = current_user.id if current_user else None
     
@@ -60,6 +62,7 @@ async def get_all_products(
         user_id=user_id,
         page=page,
         size=size,
+        sku=sku,
         category=category,
         tag=tag,
         search=search,

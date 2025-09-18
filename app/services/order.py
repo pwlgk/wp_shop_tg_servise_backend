@@ -3,6 +3,7 @@
 import math
 from typing import Optional, List
 from fastapi import HTTPException, status
+import httpx
 from sqlalchemy.orm import Session
 from redis.asyncio import Redis
 from app.bot.services import notification as notification_service
@@ -170,7 +171,9 @@ async def get_user_orders(
     params = {
         "customer": current_user.wordpress_id,
         "page": page,
-        "per_page": size
+        "per_page": size,
+        "exclude_status": "checkout-draft,trash" 
+
     }
     
     if status:
@@ -285,3 +288,42 @@ async def get_payment_gateways():
         for gw in gateways_data if gw.get("enabled")
     ]
     return enabled_gateways
+
+
+async def get_order_details(order_id: int, current_user: User) -> Order | None:
+    """
+    Получает детальную информацию о конкретном заказе,
+    обогащая ее изображениями товаров и флагом возможности отмены.
+    """
+    # 1. Получаем "сырые" данные о заказе от WooCommerce
+    try:
+        response = await wc_client.get(f"wc/v3/orders/{order_id}")
+        order_data = response.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None # Заказ не найден
+        raise # Пробрасываем другие ошибки
+
+    # 2. Проверяем права доступа: принадлежит ли заказ текущему пользователю
+    if order_data.get("customer_id") != current_user.wordpress_id:
+        # Это не заказ этого пользователя, возвращаем None, как будто он не найден
+        return None
+
+    # 3. Собираем ID товаров и обогащаем line_items
+    all_product_ids = {item.get('product_id') for item in order_data.get("line_items", []) if item.get('product_id')}
+
+    product_details_map = {}
+    if all_product_ids:
+        with get_db_context() as db:
+            for product_id in all_product_ids:
+                product_details = await catalog_service.get_product_by_id(db, redis_client, product_id, current_user.id)
+                if product_details and product_details.images:
+                    product_details_map[product_id] = product_details.images[0].src
+
+    # 4. "Склеиваем" данные
+    order_data['can_be_cancelled'] = order_data.get('status') in CANCELLABLE_STATUSES
+    for item in order_data.get("line_items", []):
+        item['image_url'] = product_details_map.get(item.get('product_id'))
+
+    # 5. Валидируем и возвращаем результат
+    return Order.model_validate(order_data)

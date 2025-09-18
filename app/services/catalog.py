@@ -1,6 +1,7 @@
 # app/services/catalog.py
 
 import json
+import logging
 from typing import List, Optional
 from redis.asyncio import Redis
 from sqlalchemy.orm import Session
@@ -8,6 +9,8 @@ from sqlalchemy.orm import Session
 from app.clients.woocommerce import wc_client
 from app.schemas.product import ProductCategory, Product, PaginatedProducts
 from app.crud.cart import get_favorite_items  # Импортируем CRUD-функцию для избранного
+
+logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 600  # 10 минут
 
@@ -75,6 +78,7 @@ async def get_products(
     page: int,
     size: int,
     user_id: Optional[int] = None,
+    sku: Optional[str] = None,
     category: Optional[int] = None,
     tag: Optional[int] = None,
     search: Optional[str] = None,
@@ -85,13 +89,14 @@ async def get_products(
     featured: Optional[bool] = None
 ) -> PaginatedProducts:
     """
-    Получает пагинированный список товаров с поддержкой фильтров, поиска, сортировки
-    и обогащает его флагом is_favorite для текущего пользователя.
+    Получает пагинированный список товаров с поддержкой фильтров,
+    поиска по тексту и артикулу (SKU), и обогащает его флагом is_favorite.
     """
     
-    # 1. Формируем уникальный ключ для кеша на основе всех параметров, включая user_id.
+    # 1. Формируем уникальный ключ для кеша на основе всех параметров.
     cache_key_parts = [
         "products", f"page:{page}", f"size:{size}",
+        f"sku:{sku}" if sku else "",
         f"cat:{category}" if category else "",
         f"tag:{tag}" if tag else "",
         f"search:{search}" if search else "",
@@ -108,20 +113,26 @@ async def get_products(
     if cached_products:
         return PaginatedProducts.model_validate(json.loads(cached_products))
         
-    # 2. Получаем ID избранных товаров для текущего пользователя (если он есть).
+    # 2. Получаем ID избранных товаров для текущего пользователя.
     favorite_product_ids = set()
     if user_id:
         favorite_items_db = get_favorite_items(db, user_id=user_id)
         favorite_product_ids = {item.product_id for item in favorite_items_db}
 
-    # 3. Формируем параметры для WooCommerce API.
+    # 3. Формируем словарь параметров для WooCommerce API.
     params = {
         "page": page, "per_page": size,
         "status": "publish", "stock_status": "instock"
     }
+    
+    # Поиск по SKU имеет приоритет над текстовым поиском.
+    if sku:
+        params["sku"] = sku
+    elif search:
+        params["search"] = search
+    
     if category: params["category"] = category
     if tag: params["tag"] = tag
-    if search: params["search"] = search
     if min_price is not None: params["min_price"] = min_price
     if max_price is not None: params["max_price"] = max_price
     if orderby in ["date", "id", "title", "price", "popularity", "rating"]: params["orderby"] = orderby
@@ -132,15 +143,18 @@ async def get_products(
     
     total_items = int(response.headers.get("X-WP-Total", 0))
     total_pages = int(response.headers.get("X-WP-TotalPages", 0))
-    
     products_data = response.json()
     
     # 4. Обогащаем данные флагом is_favorite.
     enriched_products = []
-    for p_data in products_data:
-        product_obj = Product.model_validate(p_data)
-        product_obj.is_favorite = product_obj.id in favorite_product_ids
-        enriched_products.append(product_obj)
+    if products_data and isinstance(products_data, list):
+        for p_data in products_data:
+            try:
+                product_obj = Product.model_validate(p_data)
+                product_obj.is_favorite = product_obj.id in favorite_product_ids
+                enriched_products.append(product_obj)
+            except Exception as e:
+                logger.warning(f"Failed to validate product data for product ID {p_data.get('id')}: {e}")
         
     paginated_result = PaginatedProducts(
         total_items=total_items, total_pages=total_pages,
@@ -150,7 +164,6 @@ async def get_products(
     await redis.set(cache_key, paginated_result.model_dump_json(), ex=CACHE_TTL_SECONDS)
     
     return paginated_result
-
 
 async def get_product_by_id(
     db: Session,
