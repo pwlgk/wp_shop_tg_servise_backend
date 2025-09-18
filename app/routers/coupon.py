@@ -2,11 +2,9 @@
 
 import logging
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
-from redis.asyncio import Redis
+from typing import List
 
-from app.dependencies import get_current_user, get_db
-from app.core.redis import get_redis_client
+from app.dependencies import get_current_user
 from app.models.user import User
 from app.schemas.coupon import Coupon, CouponValidateRequest
 from app.services import coupon as coupon_service
@@ -18,18 +16,17 @@ router = APIRouter()
 @router.post("/coupons/validate", response_model=Coupon)
 async def validate_coupon_endpoint(
     request_data: CouponValidateRequest,
-    # Мы не передаем зависимости current_user, db, redis в сервис,
-    # так как вся логика валидации теперь инкапсулирована в WordPress,
-    # а состав корзины передается напрямую от фронтенда.
+    current_user: User = Depends(get_current_user),
 ):
     """
     Валидирует промокод для переданного состава корзины.
-    Возвращает детали купона и точную сумму скидки, если он применим.
     """
-    # Преобразуем Pydantic-объекты в словари для отправки в сервис
+    logger.info(f"Received request to validate coupon '{request_data.coupon_code}' for user {current_user.id}")
+    print(f"Received request to validate coupon '{request_data.coupon_code}' for user {current_user.id}")
     line_items_dict = [item.model_dump() for item in request_data.line_items]
     
     return await coupon_service.validate_coupon(
+        user=current_user,
         coupon_code=request_data.coupon_code,
         line_items=line_items_dict
     )
