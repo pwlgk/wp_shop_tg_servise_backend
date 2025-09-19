@@ -41,3 +41,4 @@ class UserDashboard(BaseModel):
     loyalty_progress: LoyaltyProgress
     counters: UserCounters
     phone: str | None = None
+    has_unread_notifications: bool

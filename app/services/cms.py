@@ -44,42 +44,56 @@ def extract_image_url_from_html(html_content: str) -> str | None:
 
 async def get_active_banners(redis: Redis) -> List[Banner]:
     """
-    Получает список баннеров. Сортировка будет производиться на фронтенде.
+    Получает список баннеров с поддержкой изображений и видео.
+    Данные (URL) теперь всегда приходят готовыми из WordPress благодаря PHP-хуку.
     """
     cache_key = "cms:banners"
     
     cached_data = await redis.get(cache_key)
     if cached_data:
-        # Pydantic v2 может требовать явного указания типа для десериализации дженериков
-        # но в данном случае List[Banner] должен работать.
-        # Если возникнет ошибка, можно использовать `parse_raw_as(List[Banner], cached_data)`
         return [Banner.model_validate(b) for b in json.loads(cached_data)]
     
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Убираем параметры сортировки ---
-    # Мы больше не передаем _embed, orderby, meta_key, order
-    # Просто запрашиваем все опубликованные баннеры (до 100 штук по умолчанию)
-    params = {"per_page": 100} # Получаем до 100 баннеров, этого должно хватить
-    response = await wc_client.async_client.get("wp/v2/banners", params=params)
+    logger.info("Fetching fresh banners from WordPress API.")
+    # Запрашиваем до 100 баннеров, сортировка будет в Python
+    response = await wc_client.async_client.get("wp/v2/banners", params={"per_page": 100})
     response.raise_for_status()
     banners_data = response.json()
     
     banners = []
     for banner_item in banners_data:
-        content_html = banner_item.get("content", {}).get("rendered", "")
-        image_url = extract_image_url_from_html(content_html)
-        
-        if image_url:
+        try:
             acf_fields = banner_item.get("acf", {})
-            banners.append(Banner(
-                id=banner_item["id"],
-                title=banner_item.get("title", {}).get("rendered", ""),
-                image_url=image_url,
-                link_url=acf_fields.get("banner_link"),
-                # --- ДОБАВЛЯЕМ ПОЛЕ ДЛЯ СОРТИРОВКИ ---
-                sort_order=int(acf_fields.get("sort_order", 999)) # 999 - чтобы баннеры без номера были в конце
-            ))
+            
+            content_type = acf_fields.get("banner_content_type", "image")
+            media_url = None
+            
+            # --- УПРОЩЕННАЯ ЛОГИКА ---
+            # Просто берем URL из соответствующего поля ACF
+            if content_type == "video":
+                media_url = acf_fields.get("banner_video")
+            else: # image
+                media_url = acf_fields.get("banner_image")
+            # -------------------------
 
+            # Добавляем баннер в список, только если URL был найден
+            if media_url:
+                banners.append(Banner(
+                    id=banner_item["id"],
+                    title=banner_item.get("title", {}).get("rendered", ""),
+                    content_type=content_type,
+                    media_url=media_url,
+                    link_url=acf_fields.get("banner_link"),
+                    sort_order=int(acf_fields.get("sort_order", 999))
+                ))
+        except Exception as e:
+            logger.warning(f"Could not parse banner with ID {banner_item.get('id')}. Skipping. Error: {e}")
+
+    # Сортируем список баннеров на стороне FastAPI перед кешированием
+    banners.sort(key=lambda b: b.sort_order)
+    
     await redis.set(cache_key, json.dumps([b.model_dump(mode='json') for b in banners]), ex=CACHE_TTL_SECONDS)
+    
+    logger.info(f"Successfully fetched and cached {len(banners)} banners.")
     return banners
 
 

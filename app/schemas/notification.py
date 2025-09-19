@@ -9,7 +9,8 @@ class Notification(BaseModel):
     title: str
     message: str | None
     created_at: datetime
-    is_read: bool # Важно отдавать и этот флаг
-
+    is_read: bool # Важно отдавать и этот флаг  
+    action_url: str | None # Относительный URL для перехода внутри Mini App
+    related_entity_id: str | None # ID связанной сущности (заказа, акции и т.д.)
     class Config:
         from_attributes = True

@@ -3,13 +3,15 @@ from typing import List, Literal, Union
 class Banner(BaseModel):
     id: int
     title: str
-    image_url: HttpUrl # Оставляем HttpUrl, так как от WP всегда приходит полный URL
     
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-    # Меняем HttpUrl на простую строку str
+    # --- НОВЫЕ ПОЛЯ ---
+    content_type: Literal["image", "video"]
+    # URL будет либо для картинки, либо для видео.
+    # Можно использовать Union, но одно поле проще для фронтенда.
+    media_url: HttpUrl
+    # ----------------
+    
     link_url: str | None = None
-    # -----------------------
-    
     sort_order: int
 
 class Page(BaseModel):

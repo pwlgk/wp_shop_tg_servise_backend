@@ -11,6 +11,8 @@ from app.services import user_levels as user_levels_service # <-- Импорти
 from app.bot.services import notification as notification_service
 from app.services import loyalty as loyalty_service
 from datetime import date
+from app.crud import cart as crud_cart
+from app.crud import notification as crud_notification
 
 logger = logging.getLogger(__name__)
 
@@ -114,46 +116,56 @@ async def update_user_profile(db: Session, current_user: User, user_update_data:
 async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
     """
     Собирает ключевую информацию для "приборной панели" пользователя.
+    Этот эндпоинт оптимизирован для быстрой загрузки стартового экрана.
     """
-    # --- 1. Получаем базовые данные из WooCommerce (только ФИО) ---
-    #is_bot_accessible = await notification_service.ping_user(db, current_user)
-
-    customer_data_response = await wc_client.get(f"wc/v3/customers/{current_user.wordpress_id}")
-    customer_data = customer_data_response.json()
-    first_name = customer_data.get("first_name")
-    last_name = customer_data.get("last_name")
-
-    # --- 2. Получаем данные из нашей БД ---
-    # Счетчики
-    cart_items_count = len(get_cart_items(db, user_id=current_user.id))
-    favorite_items_count = len(get_favorite_items(db, user_id=current_user.id))
+    
+    # 1. Получаем базовые данные из WooCommerce (только ФИО)
+    try:
+        customer_data_response = await wc_client.get(f"wc/v3/customers/{current_user.wordpress_id}")
+        customer_data = customer_data_response.json()
+        first_name = customer_data.get("first_name")
+        last_name = customer_data.get("last_name")
+    except httpx.HTTPStatusError:
+        logger.warning(f"Could not fetch customer data from WC for user {current_user.id}. Using local data.")
+        first_name = current_user.first_name
+        last_name = current_user.last_name
+        
+    # 2. Получаем данные из нашей быстрой локальной БД
+    cart_items_count = len(crud_cart.get_cart_items(db, user_id=current_user.id))
+    favorite_items_count = len(crud_cart.get_favorite_items(db, user_id=current_user.id))
     counters = UserCounters(cart_items_count=cart_items_count, favorite_items_count=favorite_items_count)
     
-    # Баланс и уровень
     balance = loyalty_service.get_user_balance(db, current_user)
     level = current_user.level
+    
+    # Считаем количество ТОЛЬКО непрочитанных уведомлений
+    unread_count = crud_notification.count_notifications(db, user_id=current_user.id, unread_only=True)
+    has_unread_notifications = unread_count > 0
 
-    # --- 3. Проверяем наличие активных заказов ---
-    # Запрашиваем только 1 заказ со статусами, которые считаются "активными"
-    active_orders_response = await wc_client.get(
-        "wc/v3/orders",
-        params={"customer": current_user.wordpress_id, "status": "processing,on-hold", "per_page": 1}
-    )
-    has_active_orders = len(active_orders_response.json()) > 0
+    # 3. Проверяем наличие активных заказов в WooCommerce
+    try:
+        active_orders_response = await wc_client.get(
+            "wc/v3/orders",
+            params={"customer": current_user.wordpress_id, "status": "processing,on-hold", "per_page": 1}
+        )
+        has_active_orders = len(active_orders_response.json()) > 0
+    except httpx.HTTPStatusError:
+        logger.warning(f"Could not fetch active orders from WC for user {current_user.id}.")
+        has_active_orders = False
 
-    # --- 4. Рассчитываем прогресс до следующего уровня ---
+    # 4. Рассчитываем прогресс до следующего уровня лояльности
     current_spending = await user_levels_service.get_total_spending_for_user(current_user.wordpress_id)
     
-    # Определяем следующий уровень и сколько до него осталось
     next_level = None
     spending_to_next_level = None
     
     levels_order = ["bronze", "silver", "gold"] # Порядок уровней от низшего к высшему
     current_level_index = levels_order.index(level) if level in levels_order else -1
     
+    # Проверяем, что текущий уровень не максимальный
     if 0 <= current_level_index < len(levels_order) - 1:
         next_level_name = levels_order[current_level_index + 1]
-        next_level_threshold = user_levels_service.LEVEL_THRESHOLDS[next_level_name]
+        next_level_threshold = user_levels_service.LEVEL_THRESHOLDS.get(next_level_name, float('inf'))
         
         if current_spending < next_level_threshold:
             next_level = next_level_name
@@ -165,17 +177,17 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
         spending_to_next_level=spending_to_next_level
     )
     
-    # --- 5. Собираем финальный объект ---
+    # 5. Собираем финальный объект для ответа
     return UserDashboard(
         first_name=first_name,
         last_name=last_name,
+        is_blocked=current_user.is_blocked,
+        is_bot_accessible=current_user.bot_accessible,
+        phone=current_user.phone,
         balance=balance,
         level=level,
         has_active_orders=has_active_orders,
         loyalty_progress=loyalty_progress,
         counters=counters,
-        phone=current_user.phone, # <-- Добавляем
-
-        is_blocked=current_user.is_blocked,
-        is_bot_accessible=current_user.bot_accessible        
+        has_unread_notifications=has_unread_notifications
     )
