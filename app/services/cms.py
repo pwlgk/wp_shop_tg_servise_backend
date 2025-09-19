@@ -175,10 +175,17 @@ async def get_page_by_slug(redis: Redis, slug: str) -> StructuredPage | None:
 async def process_new_promo(promo_id: int):
     """
     Фоновая задача: получает данные об акции, находит целевых пользователей
-    и создает для них уведомления (в Mini App и в боте), избегая дубликатов.
+    и создает для них уведомления (в Mini App и в боте).
     """
-    logger.info(f"Processing new promo with ID: {promo_id}")
+    logger.info(f"--- Starting Promo Processing for ID: {promo_id} ---")
     
+    # --- КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: ДОБАВЛЯЕМ ЗАДЕРЖКУ ---
+    # Даем WordPress 5 секунд, чтобы все плагины (особенно ACF)
+    # успели сохранить свои мета-данные после хука save_post.
+    await asyncio.sleep(5)
+    logger.info(f"Promo {promo_id}: Continuing after 5-second delay.")
+    # -----------------------------------------------
+
     with SessionLocal() as db:
         try:
             # 1. Получаем полные данные об акции из WordPress
@@ -186,7 +193,7 @@ async def process_new_promo(promo_id: int):
             response.raise_for_status()
             promo_data = response.json()
 
-            logger.debug(f"Received promo data from WP for ID {promo_id}:\n{json.dumps(promo_data, indent=2)}")
+            logger.debug(f"Promo {promo_id}: Received data from WP:\n{json.dumps(promo_data, indent=2)}")
 
             # 2. Извлекаем все необходимые данные
             title = promo_data.get("title", {}).get("rendered", "Новая акция!")
@@ -196,35 +203,27 @@ async def process_new_promo(promo_id: int):
             target_level = acf_fields.get("promo_target_level", "all")
             action_url = acf_fields.get("promo_action_url")
             
-            # --- Логика извлечения URL медиа ---
+            logger.info(f"Promo {promo_id}: Parsed ACF fields. Target: {target_level}, Action URL: {action_url}")
+
+            # Надежное извлечение URL медиа
             media_url = None
+            if acf_fields and isinstance(acf_fields.get("promo_image"), str) and acf_fields.get("promo_image").startswith('http'):
+                media_url = acf_fields.get("promo_image")
             
-            # Приоритет 1: Поле ACF для изображения
-            promo_image_url = acf_fields.get("promo_image")
-            if promo_image_url and isinstance(promo_image_url, str) and promo_image_url.startswith('http'):
-                media_url = promo_image_url
-                logger.info(f"Promo {promo_id}: Media URL found in 'promo_image' ACF field.")
+            if not media_url and acf_fields and isinstance(acf_fields.get("promo_video"), str) and acf_fields.get("promo_video").startswith('http'):
+                media_url = acf_fields.get("promo_video")
             
-            # Приоритет 2: Поле ACF для видео (если изображение не найдено)
-            if not media_url:
-                promo_video_url = acf_fields.get("promo_video")
-                if promo_video_url and isinstance(promo_video_url, str) and promo_video_url.startswith('http'):
-                    media_url = promo_video_url
-                    logger.info(f"Promo {promo_id}: Media URL found in 'promo_video' ACF field.")
-            
-            # Приоритет 3: Парсинг HTML, если в полях ACF пусто
             if not media_url and content_html:
-                parsed_url = extract_image_url_from_html(content_html)
-                if parsed_url:
-                    media_url = parsed_url
-                    logger.info(f"Promo {promo_id}: Media URL extracted from content HTML as a fallback.")
+                media_url = extract_image_url_from_html(content_html)
             
-            if not media_url:
-                logger.warning(f"Promo {promo_id}: Could not find any media URL.")
-            
+            logger.info(f"Promo {promo_id}: Final media URL: {media_url}")
+
             # Очищаем основной текст от HTML-тегов
             soup = BeautifulSoup(content_html, "lxml")
+            for figure in soup.find_all('figure'):
+                figure.decompose()
             message_text = soup.get_text(separator='\n', strip=True)
+            logger.info(f"Promo {promo_id}: Cleaned message text: '{message_text[:50]}...'")
 
             # 3. Получаем список пользователей для рассылки
             users = crud_user.get_users(db, skip=0, limit=10000, level=target_level if target_level != "all" else None)
@@ -233,21 +232,20 @@ async def process_new_promo(promo_id: int):
                 logger.info(f"No target users found for promo {promo_id}. Target level: {target_level}")
                 return
 
+            logger.info(f"Promo {promo_id}: Found {len(users)} target users.")
+
             # 4. Создаем уведомления и отправляем сообщения
             for user in users:
-                # --- ДОБАВЛЕНА ПРОВЕРКА НА ДУБЛИКАТЫ ---
+                # Проверка на дубликаты
                 existing_notification = crud_notification.get_notification_by_type_and_entity(
-                    db,
-                    user_id=user.id,
-                    type="promo",
-                    related_entity_id=str(promo_id)
+                    db, user_id=user.id, type="promo", related_entity_id=str(promo_id)
                 )
-                
                 if existing_notification:
                     logger.info(f"Notification for promo {promo_id} already exists for user {user.id}. Skipping.")
-                    continue # Переходим к следующему пользователю
-                # ----------------------------------------
+                    continue
 
+                logger.debug(f"Promo {promo_id}: Creating notifications for user {user.id}...")
+                
                 # Создаем уведомление для Mini App
                 crud_notification.create_notification(
                     db=db, user_id=user.id, type="promo",
@@ -260,15 +258,16 @@ async def process_new_promo(promo_id: int):
                 # Отправляем сообщение в бот
                 await bot_notification_service.send_promo_notification(
                     db=db, user=user, title=title, text=message_text,
-                    image_url=media_url,
-                    action_url=action_url
+                    image_url=media_url, action_url=action_url
                 )
                 await asyncio.sleep(0.1)
             
-            logger.info(f"Promo {promo_id} processed for {len(users)} users.")
+            logger.info(f"Promo {promo_id}: Processing completed for {len(users)} users.")
 
         except Exception as e:
             logger.error(f"Failed to process promo {promo_id}", exc_info=True)
+            
+    logger.info(f"--- Finished Promo Processing for ID: {promo_id} ---")
 
 async def get_active_stories(redis: Redis) -> List[Story]:
     """
