@@ -172,50 +172,64 @@ async def get_page_by_slug(redis: Redis, slug: str) -> StructuredPage | None:
     await redis.set(cache_key, page.model_dump_json(), ex=CACHE_TTL_SECONDS)
     return page
 
-async def process_new_promo(promo_id: int): # <-- Убираем db отсюда, создаем внутри
+async def process_new_promo(promo_id: int):
     """
     Фоновая задача: получает данные об акции, находит целевых пользователей
     и создает для них уведомления (в Mini App и в боте).
     """
     logger.info(f"Processing new promo with ID: {promo_id}")
     
-    # Создаем сессию внутри фоновой задачи
     with SessionLocal() as db:
         try:
-            # 1. Получаем полные данные об акции из WP
+            # 1. Получаем полные данные об акции из WordPress
             response = await wc_client.async_client.get(f"wp/v2/promos/{promo_id}")
             response.raise_for_status()
             promo_data = response.json()
 
+            logger.debug(f"Received promo data from WP for ID {promo_id}:\n{json.dumps(promo_data, indent=2)}")
+
+            # 2. Извлекаем все необходимые данные
             title = promo_data.get("title", {}).get("rendered", "Новая акция!")
             content_html = promo_data.get("content", {}).get("rendered", "")
-            
             acf_fields = promo_data.get("acf", {})
+            
             target_level = acf_fields.get("promo_target_level", "all")
             action_url = acf_fields.get("promo_action_url")
             
-            image_url = extract_image_url_from_html(content_html)
+            # --- НАДЕЖНОЕ ИЗВЛЕЧЕНИЕ URL ИЗОБРАЖЕНИЯ ---
+            # Мы доверяем ACF, так как видим URL в ответе.
+            # acf_fields.get("promo_image") может вернуть False, если поле не заполнено.
+            image_url = acf_fields.get("promo_image") if isinstance(acf_fields.get("promo_image"), str) else None
             
+            if not image_url:
+                logger.warning(f"Promo {promo_id}: Image URL not found in ACF fields. Sending without image.")
+            
+            # Очищаем основной текст от HTML-тегов
             soup = BeautifulSoup(content_html, "lxml")
-            if soup.figure:
-                soup.figure.decompose()
             message_text = soup.get_text(separator='\n', strip=True)
 
-            # 2. Получаем список пользователей для рассылки
-            users = crud_user.get_users(db, skip=0, limit=10000, level=target_level if target_level != "all" else None)
+            # 3. Получаем список пользователей для рассылки
+            users = crud_user.get_users(
+                db, 
+                skip=0, 
+                limit=10000, # Лимит для рассылки
+                level=target_level if target_level != "all" else None
+            )
 
-            # 3. Создаем уведомления и отправляем сообщения
+            if not users:
+                logger.info(f"No target users found for promo {promo_id}. Target level: {target_level}")
+                return
+
+            # 4. Создаем уведомления и отправляем сообщения
             for user in users:
+                # Проверяем, не получал ли пользователь уже это уведомление
                 existing_notification = crud_notification.get_notification_by_type_and_entity(
-                    db,
-                    user_id=user.id,
-                    type="promo",
-                    related_entity_id=str(promo_id)
+                    db, user_id=user.id, type="promo", related_entity_id=str(promo_id)
                 )
-                
                 if existing_notification:
                     logger.info(f"Notification for promo {promo_id} already exists for user {user.id}. Skipping.")
                     continue
+
                 # Создаем уведомление для Mini App
                 crud_notification.create_notification(
                     db=db,
@@ -225,7 +239,7 @@ async def process_new_promo(promo_id: int): # <-- Убираем db отсюда
                     message=message_text,
                     related_entity_id=str(promo_id),
                     action_url=action_url,
-                    image_url=image_url # <-- Передаем URL картинки
+                    image_url=image_url
                 )
                 
                 # Отправляем сообщение в бот
@@ -239,7 +253,6 @@ async def process_new_promo(promo_id: int): # <-- Убираем db отсюда
 
         except Exception as e:
             logger.error(f"Failed to process promo {promo_id}", exc_info=True)
-
 
 async def get_active_stories(redis: Redis) -> List[Story]:
     """
