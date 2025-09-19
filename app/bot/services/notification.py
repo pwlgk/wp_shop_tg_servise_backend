@@ -1,5 +1,6 @@
 # app/bot/services/notification.py
 import asyncio
+from pydantic import HttpUrl
 from sqlalchemy.orm import Session
 from aiogram.exceptions import TelegramForbiddenError
 from app.schemas.order import Order
@@ -359,34 +360,47 @@ async def send_promo_notification(
     Поддерживает отправку с картинкой и кнопкой-ссылкой в Mini App.
     """
     if not user.bot_accessible:
-        print(f"Skipping promo for user {user.id}: bot is marked as inaccessible.")
+        logger.info(f"Skipping promo for user {user.id}: bot is marked as inaccessible.")
         return
 
-    # --- 1. Формируем текст сообщения ---
-    # Объединяем заголовок и основной текст
     full_text = f"<b>{title}</b>\n\n{text}"
-    
-    # Обрезаем текст, если он слишком длинный для подписи к фото (лимит Telegram 1024 символа)
     if image_url and len(full_text) > 1024:
         full_text = full_text[:1020] + "..."
 
-    # --- 2. Формируем инлайн-кнопку, если есть URL ---
     reply_markup = None
     if action_url:
-        builder = InlineKeyboardBuilder()
-        # Собираем полный URL для Mini App
-        full_action_url = f"{settings.MINI_APP_URL}{action_url}" if action_url.startswith('/') else action_url
+        # --- НОВАЯ, НАДЕЖНАЯ ЛОГИКА СБОРКИ URL ---
+        full_action_url = None
+        try:
+            # Способ 1: Проверяем, является ли это уже полным URL
+            HttpUrl(action_url)
+            full_action_url = action_url
+        except (ValueError, TypeError):
+            # Способ 2: Если нет, и это относительный путь, собираем полный URL
+            if action_url.startswith('/'):
+                # Убираем возможный слэш в конце MINI_APP_URL, чтобы избежать двойных //
+                base_app_url = settings.MINI_APP_URL.rstrip('/')
+                full_action_url = f"{base_app_url}{action_url}"
         
-        builder.button(
-            text="✨ Участвовать!",
-            web_app=WebAppInfo(url=full_action_url)
-        )
-        reply_markup = builder.as_markup()
+        if full_action_url:
+            try:
+                # Еще одна проверка, что итоговый URL валиден
+                HttpUrl(full_action_url)
+                
+                builder = InlineKeyboardBuilder()
+                builder.button(
+                    text="✨ Перейти к акции",
+                    web_app=WebAppInfo(url=full_action_url)
+                )
+                reply_markup = builder.as_markup()
+            except (ValueError, TypeError):
+                logger.warning(f"Generated action_url '{full_action_url}' is not a valid URL. Sending promo without a button.")
+        else:
+            logger.warning(f"Provided action_url '{action_url}' is not a valid relative or absolute URL. Sending promo without a button.")
+        # -----------------------------------------------
 
-    # --- 3. Отправляем сообщение ---
     try:
         if image_url:
-            # Если есть картинка, отправляем как фото с подписью
             await bot.send_photo(
                 chat_id=user.telegram_id,
                 photo=image_url,
@@ -394,12 +408,11 @@ async def send_promo_notification(
                 reply_markup=reply_markup
             )
         else:
-            # Если картинки нет, отправляем как простое сообщение
             await bot.send_message(
                 chat_id=user.telegram_id,
                 text=full_text,
                 reply_markup=reply_markup,
-                disable_web_page_preview=True # Отключаем превью ссылок в тексте
+                disable_web_page_preview=True
             )
     except TelegramForbiddenError:
         print(f"User {user.id} has blocked the bot while sending promo. Updating status.")
