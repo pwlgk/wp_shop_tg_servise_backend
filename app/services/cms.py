@@ -175,7 +175,7 @@ async def get_page_by_slug(redis: Redis, slug: str) -> StructuredPage | None:
 async def process_new_promo(promo_id: int):
     """
     Фоновая задача: получает данные об акции, находит целевых пользователей
-    и создает для них уведомления (в Mini App и в боте).
+    и создает для них уведомления (в Mini App и в боте), избегая дубликатов.
     """
     logger.info(f"Processing new promo with ID: {promo_id}")
     
@@ -196,34 +196,35 @@ async def process_new_promo(promo_id: int):
             target_level = acf_fields.get("promo_target_level", "all")
             action_url = acf_fields.get("promo_action_url")
             
-            # --- Извлекаем URL медиа и очищаем текст ---
+            # --- Логика извлечения URL медиа ---
             media_url = None
             
             # Приоритет 1: Поле ACF для изображения
             promo_image_url = acf_fields.get("promo_image")
             if promo_image_url and isinstance(promo_image_url, str) and promo_image_url.startswith('http'):
                 media_url = promo_image_url
+                logger.info(f"Promo {promo_id}: Media URL found in 'promo_image' ACF field.")
             
-            # Приоритет 2: Поле ACF для видео
+            # Приоритет 2: Поле ACF для видео (если изображение не найдено)
             if not media_url:
                 promo_video_url = acf_fields.get("promo_video")
                 if promo_video_url and isinstance(promo_video_url, str) and promo_video_url.startswith('http'):
                     media_url = promo_video_url
+                    logger.info(f"Promo {promo_id}: Media URL found in 'promo_video' ACF field.")
             
-            # Приоритет 3: Парсинг HTML как fallback
+            # Приоритет 3: Парсинг HTML, если в полях ACF пусто
             if not media_url and content_html:
-                media_url = extract_image_url_from_html(content_html)
+                parsed_url = extract_image_url_from_html(content_html)
+                if parsed_url:
+                    media_url = parsed_url
+                    logger.info(f"Promo {promo_id}: Media URL extracted from content HTML as a fallback.")
             
-            # --- ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: ПРАВИЛЬНАЯ ОЧИСТКА ТЕКСТА ---
+            if not media_url:
+                logger.warning(f"Promo {promo_id}: Could not find any media URL.")
+            
+            # Очищаем основной текст от HTML-тегов
             soup = BeautifulSoup(content_html, "lxml")
-            
-            # Находим и удаляем ВСЕ блоки с картинками, чтобы они не попали в текст
-            for figure in soup.find_all('figure', class_='wp-block-image'):
-                figure.decompose()
-                
-            # Теперь извлекаем текст из "очищенного" HTML
             message_text = soup.get_text(separator='\n', strip=True)
-            # --------------------------------------------------------
 
             # 3. Получаем список пользователей для рассылки
             users = crud_user.get_users(db, skip=0, limit=10000, level=target_level if target_level != "all" else None)
@@ -234,13 +235,20 @@ async def process_new_promo(promo_id: int):
 
             # 4. Создаем уведомления и отправляем сообщения
             for user in users:
+                # --- ДОБАВЛЕНА ПРОВЕРКА НА ДУБЛИКАТЫ ---
                 existing_notification = crud_notification.get_notification_by_type_and_entity(
-                    db, user_id=user.id, type="promo", related_entity_id=str(promo_id)
+                    db,
+                    user_id=user.id,
+                    type="promo",
+                    related_entity_id=str(promo_id)
                 )
+                
                 if existing_notification:
                     logger.info(f"Notification for promo {promo_id} already exists for user {user.id}. Skipping.")
-                    continue
+                    continue # Переходим к следующему пользователю
+                # ----------------------------------------
 
+                # Создаем уведомление для Mini App
                 crud_notification.create_notification(
                     db=db, user_id=user.id, type="promo",
                     title=title, message=message_text,
@@ -249,9 +257,11 @@ async def process_new_promo(promo_id: int):
                     image_url=media_url
                 )
                 
+                # Отправляем сообщение в бот
                 await bot_notification_service.send_promo_notification(
                     db=db, user=user, title=title, text=message_text,
-                    image_url=media_url, action_url=action_url
+                    image_url=media_url,
+                    action_url=action_url
                 )
                 await asyncio.sleep(0.1)
             
