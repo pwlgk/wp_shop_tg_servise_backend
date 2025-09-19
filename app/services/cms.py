@@ -11,7 +11,7 @@ from app.crud import notification as crud_notification
 from app.bot.services import notification as bot_notification_service
 from app.clients.woocommerce import wc_client
 from app.db.session import SessionLocal
-from app.schemas.cms import Banner, Page, PageBlock, StructuredPage
+from app.schemas.cms import Banner, Page, StructuredPage, PageBlock, Story # <-- Добавляем Story
 import logging
 
 logger = logging.getLogger(__name__)
@@ -224,7 +224,8 @@ async def process_new_promo(promo_id: int): # <-- Убираем db отсюда
                     title=title,
                     message=message_text,
                     related_entity_id=str(promo_id),
-                    action_url=action_url
+                    action_url=action_url,
+                    image_url=image_url # <-- Передаем URL картинки
                 )
                 
                 # Отправляем сообщение в бот
@@ -238,3 +239,55 @@ async def process_new_promo(promo_id: int): # <-- Убираем db отсюда
 
         except Exception as e:
             logger.error(f"Failed to process promo {promo_id}", exc_info=True)
+
+
+async def get_active_stories(redis: Redis) -> List[Story]:
+    """
+    Получает список активных сторисов с поддержкой изображений и видео.
+    """
+    cache_key = "cms:stories"
+    
+    cached_data = await redis.get(cache_key)
+    if cached_data:
+        return [Story.model_validate(s) for s in json.loads(cached_data)]
+
+    logger.info("Fetching fresh stories from WordPress API.")
+    response = await wc_client.async_client.get("wp/v2/stories", params={"per_page": 100})
+    response.raise_for_status()
+    stories_data = response.json()
+
+    stories = []
+    for story_item in stories_data:
+        try:
+            acf_fields = story_item.get("acf", {})
+            content_type = acf_fields.get("story_content_type", "image")
+            media_url = None
+            
+            if content_type == "video":
+                media_url = acf_fields.get("story_video")
+            else: # image
+                media_url = acf_fields.get("story_image")
+
+            if media_url:
+                # Описание берем из основного редактора и очищаем от HTML
+                description_html = story_item.get("content", {}).get("rendered", "")
+                soup = BeautifulSoup(description_html, "lxml")
+                description_text = soup.get_text(strip=True)
+
+                stories.append(Story(
+                    id=story_item["id"],
+                    title=story_item.get("title", {}).get("rendered", ""),
+                    description=description_text,
+                    content_type=content_type,
+                    media_url=media_url,
+                    link_url=acf_fields.get("story_link"),
+                    sort_order=int(acf_fields.get("sort_order", 999))
+                ))
+        except Exception as e:
+            logger.warning(f"Could not parse story with ID {story_item.get('id')}. Skipping. Error: {e}")
+
+    stories.sort(key=lambda s: s.sort_order)
+    
+    await redis.set(cache_key, json.dumps([s.model_dump(mode='json') for s in stories]), ex=CACHE_TTL_SECONDS)
+    
+    return stories

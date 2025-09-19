@@ -12,7 +12,8 @@ def create_notification(
     title: str, 
     message: str | None = None,
     related_entity_id: str | None = None,
-    action_url: str | None = None  # <-- Убедитесь, что этот аргумент присутствует
+    action_url: str | None = None,  # <-- Убедитесь, что этот аргумент присутствует
+    image_url: str | None = None
 ) -> Notification:
     """Создает новое уведомление для пользователя."""
     db_notification = Notification(
@@ -21,7 +22,8 @@ def create_notification(
         title=title,
         message=message,
         related_entity_id=related_entity_id,
-        action_url=action_url # <-- И используется здесь
+        action_url=action_url, # <-- И используется здесь
+        image_url=image_url
     )
     db.add(db_notification)
     db.commit()

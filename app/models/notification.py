@@ -13,7 +13,8 @@ class Notification(Base):
     type = Column(String, nullable=False, index=True)
     title = Column(String, nullable=False)
     message = Column(Text, nullable=True)
-    
+    image_url = Column(String, nullable=True) # URL изображения для уведомления
+
     # ID связанной сущности (например, ID заказа или транзакции)
     related_entity_id = Column(String, nullable=True) 
     action_url = Column(String, nullable=True) 

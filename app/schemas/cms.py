@@ -51,3 +51,13 @@ class StructuredPage(BaseModel):
 
 class PromoWebhookPayload(BaseModel):
     promo_id: int
+
+
+class Story(BaseModel):
+    id: int
+    title: str
+    description: str # Будем брать из основного контента
+    content_type: Literal["image", "video"]
+    media_url: HttpUrl
+    link_url: str | None = None
+    sort_order: int

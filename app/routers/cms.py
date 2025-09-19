@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from redis.asyncio import Redis
 from typing import List
-from app.schemas.cms import Banner, StructuredPage
+from app.schemas.cms import Banner, Page, StructuredPage, Story # <-- Добавляем Story
 from app.core.redis import get_redis_client
 from app.schemas.cms import Banner, Page
 from app.services import cms as cms_service
@@ -25,3 +25,9 @@ async def get_page(slug: str, redis: Redis = Depends(get_redis_client)):
     if not page:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Page not found")
     return page
+
+
+@router.get("/stories", response_model=List[Story])
+async def get_stories(redis: Redis = Depends(get_redis_client)):
+    """Получение списка активных сторисов."""
+    return await cms_service.get_active_stories(redis)
