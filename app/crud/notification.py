@@ -1,6 +1,6 @@
 # app/crud/notification.py
 from sqlalchemy.orm import Session
-from sqlalchemy import update, or_
+from sqlalchemy import update, or_, and_
 from app.models.notification import Notification
 from typing import List
 from datetime import datetime, timedelta
@@ -74,21 +74,33 @@ def smart_delete_old_notifications(
     read_older_than_days: int, 
     any_older_than_days: int
 ) -> int:
-    """Удаляет уведомления по "умным" правилам."""
+    """
+    Удаляет уведомления по "умным" правилам:
+    1. Прочитанные и старше `read_older_than_days`.
+    2. Любые (включая непрочитанные) и старше `any_older_than_days`.
+    """
     read_threshold = datetime.utcnow() - timedelta(days=read_older_than_days)
     any_threshold = datetime.utcnow() - timedelta(days=any_older_than_days)
     
-    condition_read_and_old = (
+    # --- ИСПРАВЛЕННАЯ ЛОГИКА УСЛОВИЙ ---
+    
+    # Условие 1: (Прочитано И Старое)
+    condition_read_and_old = and_(
         Notification.is_read == True,
         Notification.created_at < read_threshold
     )
+    
+    # Условие 2: (Очень старое)
     condition_any_very_old = (
         Notification.created_at < any_threshold
     )
     
+    # Объединяем Условие 1 ИЛИ Условие 2
     result = db.query(Notification).filter(
-        or_(*condition_read_and_old, condition_any_very_old)
+        or_(condition_read_and_old, condition_any_very_old)
     ).delete(synchronize_session=False)
+    
+    # -----------------------------------
     
     db.commit()
     return result
