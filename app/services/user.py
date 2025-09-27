@@ -10,7 +10,7 @@ from app.crud.cart import get_cart_items, get_favorite_items
 from app.services import user_levels as user_levels_service # <-- Импортируем
 from app.bot.services import notification as notification_service
 from app.services import loyalty as loyalty_service
-from datetime import date
+from datetime import date, datetime, timedelta
 from app.crud import cart as crud_cart
 from app.crud import notification as crud_notification
 
@@ -142,6 +142,24 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
     unread_count = crud_notification.count_notifications(db, user_id=current_user.id, unread_only=True)
     has_unread_notifications = unread_count > 0
 
+    is_profile_incomplete = (
+        not current_user.first_name 
+        or not current_user.last_name 
+        or not current_user.phone 
+        or not current_user.birth_date
+    )
+
+    # 2. Проверяем, является ли пользователь "новичком"
+    is_new_user = (datetime.utcnow() - current_user.created_at) < timedelta(days=1)
+
+    # 3. Вычисляем итоговый статус
+    profile_status = "completed" # Значение по умолчанию
+    if is_profile_incomplete:
+        if is_new_user:
+            profile_status = "required"
+        else:
+            profile_status = "optional"
+
     # 3. Проверяем наличие активных заказов в WooCommerce
     try:
         active_orders_response = await wc_client.get(
@@ -189,5 +207,6 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
         has_active_orders=has_active_orders,
         loyalty_progress=loyalty_progress,
         counters=counters,
-        has_unread_notifications=has_unread_notifications
+        has_unread_notifications=has_unread_notifications,
+        profile_completion_status=profile_status
     )

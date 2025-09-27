@@ -1,7 +1,7 @@
 # app/schemas/loyalty.py
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List
+from typing import List, Literal
 
 from app.schemas.user import UserCounters
 
@@ -42,3 +42,4 @@ class UserDashboard(BaseModel):
     counters: UserCounters
     phone: str | None = None
     has_unread_notifications: bool
+    profile_completion_status: Literal["completed", "required", "optional"]
