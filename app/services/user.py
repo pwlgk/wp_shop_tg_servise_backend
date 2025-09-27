@@ -181,10 +181,11 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
 
     # Критерии незавершенности
     is_name_missing = not (first_name and last_name)
-    is_phone_missing = not current_user.phone
+    # is_phone_missing = not current_user.phone
     is_birth_date_missing = not current_user.birth_date
     
-    is_profile_incomplete = is_name_missing or is_phone_missing or is_birth_date_missing
+    # is_profile_incomplete = is_name_missing or is_phone_missing or is_birth_date_missing
+    is_profile_incomplete = is_name_missing or is_birth_date_missing
 
     if is_profile_incomplete:
         # Проверяем, "совсем" ли новый пользователь.
