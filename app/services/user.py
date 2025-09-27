@@ -10,7 +10,7 @@ from app.crud.cart import get_cart_items, get_favorite_items
 from app.services import user_levels as user_levels_service # <-- Импортируем
 from app.bot.services import notification as notification_service
 from app.services import loyalty as loyalty_service
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from app.crud import cart as crud_cart
 from app.crud import notification as crud_notification
 
@@ -150,8 +150,7 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
     )
 
     # 2. Проверяем, является ли пользователь "новичком"
-    is_new_user = (datetime.utcnow() - current_user.created_at) < timedelta(days=1)
-
+    is_new_user = (datetime.now(timezone.utc) - current_user.created_at) < timedelta(days=1)
     # 3. Вычисляем итоговый статус
     profile_status = "completed" # Значение по умолчанию
     if is_profile_incomplete:
