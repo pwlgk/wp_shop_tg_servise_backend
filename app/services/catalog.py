@@ -207,3 +207,15 @@ async def get_product_by_id(
         return product
     except Exception:
         return None
+
+async def _get_any_product_by_id_from_wc(product_id: int) -> dict | None:
+    """
+    Получает "сырые" данные о товаре из WooCommerce по ID,
+    ИГНОРИРУЯ кеш и статус наличия.
+    """
+    try:
+        response = await wc_client.get(f"wc/v3/products/{product_id}")
+        return response.json()
+    except Exception:
+        logger.warning(f"Could not fetch product data from WC for product ID {product_id} (it may be deleted).")
+        return None

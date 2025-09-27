@@ -206,9 +206,10 @@ async def get_user_orders(
         # так как она нужна сервису каталога для проверки избранного.
         with get_db_context() as db:
             for product_id in all_product_ids:
-                product_details = await catalog_service.get_product_by_id(
-                    db, redis_client, product_id, current_user.id
-                )
+                # product_details = await catalog_service.get_product_by_id(
+                #     db, redis_client, product_id, current_user.id
+                # )
+                product_details = await catalog_service._get_any_product_by_id_from_wc(product_id)
                 if product_details and product_details.images:
                     # Сохраняем URL первого изображения
                     product_details_map[product_id] = product_details.images[0].src
