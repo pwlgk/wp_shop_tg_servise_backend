@@ -177,7 +177,7 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
         spending_to_next_level=spending_to_next_level
     )
 
-    profile_completion_status = "complete" # По умолчанию считаем, что все заполнено
+    profile_completion_status = "new_user_prompt" # По умолчанию считаем, что все заполнено
 
     # # Критерии незавершенности
     # is_name_missing = not (first_name and last_name)
