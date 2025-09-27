@@ -10,7 +10,7 @@ from app.crud.cart import get_cart_items, get_favorite_items
 from app.services import user_levels as user_levels_service # <-- Импортируем
 from app.bot.services import notification as notification_service
 from app.services import loyalty as loyalty_service
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from app.crud import cart as crud_cart
 from app.crud import notification as crud_notification
 
@@ -142,23 +142,6 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
     unread_count = crud_notification.count_notifications(db, user_id=current_user.id, unread_only=True)
     has_unread_notifications = unread_count > 0
 
-    is_profile_incomplete = (
-        not current_user.first_name 
-        or not current_user.last_name 
-        or not current_user.phone 
-        or not current_user.birth_date
-    )
-
-    # 2. Проверяем, является ли пользователь "новичком"
-    is_new_user = (datetime.now(timezone.utc) - current_user.created_at) < timedelta(days=1)
-    # 3. Вычисляем итоговый статус
-    profile_status = "completed" # Значение по умолчанию
-    if is_profile_incomplete:
-        if is_new_user:
-            profile_status = "required"
-        else:
-            profile_status = "optional"
-
     # 3. Проверяем наличие активных заказов в WooCommerce
     try:
         active_orders_response = await wc_client.get(
@@ -193,6 +176,25 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
         next_level=next_level,
         spending_to_next_level=spending_to_next_level
     )
+
+    profile_completion_status = "complete" # По умолчанию считаем, что все заполнено
+
+    # Критерии незавершенности
+    is_name_missing = not (first_name and last_name)
+    is_phone_missing = not current_user.phone
+    is_birth_date_missing = not current_user.birth_date
+    
+    is_profile_incomplete = is_name_missing or is_phone_missing or is_birth_date_missing
+
+    if is_profile_incomplete:
+        # Проверяем, "совсем" ли новый пользователь.
+        # Критерий: он был создан менее 1 дня назад.
+        time_since_creation = datetime.utcnow().replace(tzinfo=None) - current_user.created_at.replace(tzinfo=None)
+        
+        if time_since_creation < timedelta(days=1):
+            profile_completion_status = "new_user_prompt"
+        else:
+            profile_completion_status = "incomplete_profile_indicator"
     
     # 5. Собираем финальный объект для ответа
     return UserDashboard(
@@ -207,5 +209,5 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
         loyalty_progress=loyalty_progress,
         counters=counters,
         has_unread_notifications=has_unread_notifications,
-        profile_completion_status=profile_status
+        profile_completion_status=profile_completion_status
     )

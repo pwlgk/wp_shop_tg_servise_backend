@@ -42,4 +42,8 @@ class UserDashboard(BaseModel):
     counters: UserCounters
     phone: str | None = None
     has_unread_notifications: bool
-    profile_completion_status: Literal["completed", "required", "optional"]
+    profile_completion_status: Literal[
+            "new_user_prompt", 
+            "incomplete_profile_indicator", 
+            "complete"
+        ]
