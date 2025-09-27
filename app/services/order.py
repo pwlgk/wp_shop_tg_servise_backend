@@ -157,6 +157,7 @@ async def create_order_from_cart(
     await notification_service.send_new_order_to_admin(validated_order, current_user)
 
     return validated_order
+
 async def get_user_orders(
     current_user: User,
     page: int,
@@ -167,13 +168,11 @@ async def get_user_orders(
     Получает историю заказов пользователя из WooCommerce, обогащая ее
     изображениями товаров и флагом возможности отмены.
     """
-    # 1. Формируем параметры и получаем "сырые" данные о заказах от WooCommerce
+    # 1. Формируем параметры для WooCommerce API
     params = {
         "customer": current_user.wordpress_id,
         "page": page,
-        "per_page": size,
-        "exclude_status": "checkout-draft" 
-
+        "per_page": size
     }
     
     if status:
@@ -186,49 +185,46 @@ async def get_user_orders(
 
     response = await wc_client.get("wc/v3/orders", params=params)
     
+    # Заголовки ответа могут быть неточными, если мы фильтруем вручную, но это лучший вариант
     total_items = int(response.headers.get("X-WP-Total", 0))
     total_pages = int(response.headers.get("X-WP-TotalPages", 0))
     orders_data = response.json()
     
-    # 2. Собираем ID всех уникальных товаров из всех полученных заказов
+    # 2. Фильтруем "сырые" данные на нашей стороне (как запасной и основной вариант)
+    filtered_orders_data = [
+        order for order in orders_data 
+        if order.get("status") != "checkout-draft"
+    ]
+    
+    # 3. Собираем ID всех уникальных товаров из отфильтрованных заказов
     all_product_ids = set()
-    if orders_data and isinstance(orders_data, list):
-        for order in orders_data:
+    if filtered_orders_data and isinstance(filtered_orders_data, list):
+        for order in filtered_orders_data:
             for item in order.get("line_items", []):
                 if item.get("product_id"):
                     all_product_ids.add(item['product_id'])
 
-    # 3. Получаем детальную информацию (включая изображения) для всех этих товаров
-    # Этот шаг будет очень быстрым благодаря кешированию в Redis.
+    # 4. Получаем детальную информацию для всех этих товаров
     product_details_map = {}
     if all_product_ids:
-        # Используем контекстный менеджер для получения сессии БД,
-        # так как она нужна сервису каталога для проверки избранного.
-        with get_db_context() as db:
-            for product_id in all_product_ids:
-                # product_details = await catalog_service.get_product_by_id(
-                #     db, redis_client, product_id, current_user.id
-                # )
-                product_details = await catalog_service._get_any_product_by_id_from_wc(product_id)
-                if product_details and product_details.images:
-                    # Сохраняем URL первого изображения
-                    product_details_map[product_id] = product_details.images[0].src
+        for product_id in all_product_ids:
+            product_data = await catalog_service._get_any_product_by_id_from_wc(product_id)
+            if product_data:
+                images = product_data.get("images")
+                if images and isinstance(images, list) and len(images) > 0:
+                    product_details_map[product_id] = images[0].get("src")
 
-    # 4. "Обогащаем" данные заказов: добавляем URL изображений и флаг отмены
-    for order_dict in orders_data:
-        # Добавляем флаг возможности отмены
+    # 5. "Обогащаем" отфильтрованные данные
+    for order_dict in filtered_orders_data:
         order_dict['can_be_cancelled'] = order_dict.get('status') in CANCELLABLE_STATUSES
-        
-        # Добавляем URL изображений к каждой товарной позиции
         for item in order_dict.get("line_items", []):
             item['image_url'] = product_details_map.get(item.get('product_id'))
             
-    # 5. Валидируем обогащенные данные и формируем пагинированный ответ
+    # 6. Валидируем и формируем ответ
     try:
-        validated_orders = [Order.model_validate(order) for order in orders_data]
+        validated_orders = [Order.model_validate(order) for order in filtered_orders_data]
     except Exception as e:
         logger.error("Failed to validate enriched order data", exc_info=True)
-        # В случае ошибки валидации возвращаем пустой список, чтобы не ломать фронтенд
         validated_orders = []
     
     return PaginatedOrders(
@@ -238,7 +234,6 @@ async def get_user_orders(
         size=size,
         items=validated_orders
     )
-
 
 async def cancel_order(db: Session, order_id: int, current_user: User) -> Order: # <-- Добавляем db
 
