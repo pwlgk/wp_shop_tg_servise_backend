@@ -179,23 +179,23 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
 
     profile_completion_status = "complete" # По умолчанию считаем, что все заполнено
 
-    # Критерии незавершенности
-    is_name_missing = not (first_name and last_name)
-    # is_phone_missing = not current_user.phone
-    is_birth_date_missing = not current_user.birth_date
+    # # Критерии незавершенности
+    # is_name_missing = not (first_name and last_name)
+    # # is_phone_missing = not current_user.phone
+    # is_birth_date_missing = not current_user.birth_date
     
-    # is_profile_incomplete = is_name_missing or is_phone_missing or is_birth_date_missing
-    is_profile_incomplete = is_name_missing or is_birth_date_missing
+    # # is_profile_incomplete = is_name_missing or is_phone_missing or is_birth_date_missing
+    # is_profile_incomplete = is_name_missing or is_birth_date_missing
 
-    if is_profile_incomplete:
-        # Проверяем, "совсем" ли новый пользователь.
-        # Критерий: он был создан менее 1 дня назад.
-        time_since_creation = datetime.utcnow().replace(tzinfo=None) - current_user.created_at.replace(tzinfo=None)
+    # if is_profile_incomplete:
+    #     # Проверяем, "совсем" ли новый пользователь.
+    #     # Критерий: он был создан менее 1 дня назад.
+    #     time_since_creation = datetime.utcnow().replace(tzinfo=None) - current_user.created_at.replace(tzinfo=None)
         
-        if time_since_creation < timedelta(days=1):
-            profile_completion_status = "new_user_prompt"
-        else:
-            profile_completion_status = "incomplete_profile_indicator"
+    #     if time_since_creation < timedelta(days=1):
+    #         profile_completion_status = "new_user_prompt"
+    #     else:
+    #         profile_completion_status = "incomplete_profile_indicator"
     
     # 5. Собираем финальный объект для ответа
     return UserDashboard(
