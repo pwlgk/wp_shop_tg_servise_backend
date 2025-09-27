@@ -289,7 +289,8 @@ async def get_payment_gateways():
 async def get_order_details(order_id: int, current_user: User) -> Order | None:
     """
     Получает детальную информацию о конкретном заказе,
-    обогащая ее изображениями товаров и флагом возможности отмены.
+    обогащая ее изображениями товаров (включая те, что не в наличии)
+    и флагом возможности отмены.
     """
     # 1. Получаем "сырые" данные о заказе от WooCommerce
     try:
@@ -298,28 +299,44 @@ async def get_order_details(order_id: int, current_user: User) -> Order | None:
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return None # Заказ не найден
-        raise # Пробрасываем другие ошибки
+        logger.error(f"Failed to fetch order details for order ID {order_id}", exc_info=True)
+        raise
 
-    # 2. Проверяем права доступа: принадлежит ли заказ текущему пользователю
-    if order_data.get("customer_id") != current_user.wordpress_id:
-        # Это не заказ этого пользователя, возвращаем None, как будто он не найден
+    # 2. Проверяем, не является ли это техническим черновиком
+    if order_data.get("status") == "checkout-draft":
+        logger.warning(f"User {current_user.id} tried to access a draft order {order_id}.")
         return None
 
-    # 3. Собираем ID товаров и обогащаем line_items
-    all_product_ids = {item.get('product_id') for item in order_data.get("line_items", []) if item.get('product_id')}
+    # 3. Проверяем права доступа: принадлежит ли заказ текущему пользователю
+    if order_data.get("customer_id") != current_user.wordpress_id:
+        logger.warning(f"User {current_user.id} tried to access order {order_id} belonging to another customer.")
+        return None
 
+    # 4. Собираем ID товаров для "обогащения"
+    all_product_ids = {
+        item.get('product_id') 
+        for item in order_data.get("line_items", []) 
+        if item.get('product_id')
+    }
+
+    # 5. Получаем детали товаров, включая те, что не в наличии
     product_details_map = {}
     if all_product_ids:
-        with get_db_context() as db:
-            for product_id in all_product_ids:
-                product_details = await catalog_service.get_product_by_id(db, redis_client, product_id, current_user.id)
-                if product_details and product_details.images:
-                    product_details_map[product_id] = product_details.images[0].src
+        for product_id in all_product_ids:
+            product_data = await catalog_service._get_any_product_by_id_from_wc(product_id)
+            if product_data:
+                images = product_data.get("images")
+                if images and isinstance(images, list) and len(images) > 0:
+                    product_details_map[product_id] = images[0].get("src")
 
-    # 4. "Склеиваем" данные
+    # 6. "Склеиваем" данные
     order_data['can_be_cancelled'] = order_data.get('status') in CANCELLABLE_STATUSES
     for item in order_data.get("line_items", []):
         item['image_url'] = product_details_map.get(item.get('product_id'))
 
-    # 5. Валидируем и возвращаем результат
-    return Order.model_validate(order_data)
+    # 7. Валидируем и возвращаем результат
+    try:
+        return Order.model_validate(order_data)
+    except Exception as e:
+        logger.error(f"Failed to validate enriched single order data for order ID {order_id}", exc_info=True)
+        return None
