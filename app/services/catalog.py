@@ -156,6 +156,7 @@ async def get_products(
                 media_details = p_data["_embedded"]["wp:featuredmedia"][0]["media_details"]
                 # `woocommerce_thumbnail` - это стандартный размер WooCommerce
                 thumbnail_url = media_details["sizes"]["woocommerce_thumbnail"]["source_url"]
+                logger.info("Add woocommerce_thumbnail")
             except (KeyError, IndexError):
                 # Если что-то пошло не так (нет картинки, нет нужного размера),
                 # используем полноразмерное изображение как fallback.
