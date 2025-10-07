@@ -254,7 +254,7 @@ async def order_updated_webhook(request: Request, db: Session = Depends(get_db))
                     )
                     
                     # 3. Отправляем уведомления (в бот и Mini App)
-                    await bot_notification_service.send_points_refund_notification(db, user, points_to_refund, order_id)
+                    # await bot_notification_service.send_points_refund_notification(db, user, points_to_refund, order_id)
                     crud_notification.create_notification(
                         db, user_id=user.id, type="points_refund",
                         title="Баллы возвращены",
