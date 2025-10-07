@@ -264,9 +264,9 @@ async def cancel_order(db: Session, order_id: int, current_user: User) -> Order:
     validated_order = Order.model_validate(updated_order_data)
     
     # --- ОТПРАВКА УВЕДОМЛЕНИЯ ---
-    await notification_service.send_order_cancellation_confirmation(
-        db, current_user, validated_order.id
-    )
+    # await notification_service.send_order_cancellation_confirmation(
+    #     db, current_user, validated_order.id
+    # )
 
     await notification_service.send_order_cancellation_to_admin(
         order_id=validated_order.id,

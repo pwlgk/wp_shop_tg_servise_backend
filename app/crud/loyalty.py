@@ -102,3 +102,14 @@ def get_transactions_expiring_soon(db: Session, days_before_expiration: int) -> 
     ).all()
     
     return query
+
+
+def get_spend_transaction_by_order_id(db: Session, user_id: int, order_id_wc: int) -> LoyaltyTransaction | None:
+    """
+    Находит транзакцию списания баллов ('order_spend') для конкретного заказа.
+    """
+    return db.query(LoyaltyTransaction).filter_by(
+        user_id=user_id,
+        order_id_wc=order_id_wc,
+        type="order_spend"
+    ).first()

@@ -513,3 +513,13 @@ async def send_welcome_bonus(db: Session, user: User, points_added: int):
         f"Вы можете использовать их для оплаты ваших первых покупок. Приятного шоппинга!"
     )
     await _send_message(db, user, message)
+
+
+async def send_points_refund_notification(db: Session, user: User, points_refunded: int, order_id: int):
+    """Уведомление о возврате списанных баллов после отмены заказа."""
+    message = (
+        f"🔄 <b>Бонусы возвращены!</b>\n\n"
+        f"Заказ №<b>{order_id}</b> был отменен, и мы вернули на ваш счет "
+        f"<b>{points_refunded} списанных баллов</b>."
+    )
+    await _send_message(db, user, message)

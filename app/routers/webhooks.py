@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from app.core.redis import get_redis_client
 from app.core.config import settings
 from app.dependencies import get_db
+from app.models.loyalty import LoyaltyTransaction
 from app.models.referral import Referral
 from app.schemas.cms import PromoWebhookPayload
 from app.services import loyalty as loyalty_service
@@ -228,8 +229,43 @@ async def order_updated_webhook(request: Request, db: Session = Depends(get_db))
                     related_entity_id=str(order_id)
                 )
             await check_and_reward_referrer(db, user)
+        elif order_status == "cancelled":
+            logger.info(f"Order {order_id} was cancelled. Checking for spent points to refund.")
+            
+            # 1. Ищем транзакцию списания для этого заказа
+            spend_transaction = crud_loyalty.get_spend_transaction_by_order_id(
+                db, user_id=user.id, order_id_wc=order_id
+            )
+            
+            if spend_transaction:
+                # 2. Если списание было, создаем "возвратную" транзакцию
+                points_to_refund = -spend_transaction.points # `points` отрицательное, поэтому `-` делает его положительным
+                
+                # Проверяем, не был ли уже сделан возврат для этого заказа
+                has_refund = db.query(LoyaltyTransaction).filter_by(user_id=user.id, order_id_wc=order_id, type="points_refund").first()
+                
+                if not has_refund:
+                    crud_loyalty.create_transaction(
+                        db,
+                        user_id=user.id,
+                        points=points_to_refund,
+                        type="points_refund",
+                        order_id_wc=order_id
+                    )
+                    
+                    # 3. Отправляем уведомления (в бот и Mini App)
+                    await bot_notification_service.send_points_refund_notification(db, user, points_to_refund, order_id)
+                    crud_notification.create_notification(
+                        db, user_id=user.id, type="points_refund",
+                        title="Баллы возвращены",
+                        message=f"Списанные баллы за отмененный заказ №{order_id} возвращены на ваш счет."
+                    )
+                    logger.info(f"Refunded {points_to_refund} points to user {user.id} for cancelled order {order_id}.")
+                else:
+                    logger.warning(f"Refund for order {order_id} already exists. Skipping.")
         
         return {"status": "ok", "message": f"Successfully processed webhook for order {order_id}"}
+
 
     except Exception as e:
         logger.error(f"Error during webhook business logic for order {order_id}", exc_info=True)
