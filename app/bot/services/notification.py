@@ -473,3 +473,30 @@ async def send_manual_points_update(db: Session, user: User, points_adjusted: in
     
     message = f"{action_text}\n{comment_text}".strip()
     await _send_message(db, user, message)
+
+
+async def send_order_cancellation_to_admin(order_id: int, user: User):
+    """
+    Отправляет уведомление в админский чат о том, что
+    пользователь самостоятельно отменил заказ.
+    """
+    user_info = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    if user.username:
+        user_info += f" (@{user.username})"
+    else:
+        user_info += f" (ID: {user.telegram_id})"
+
+    message = (
+        f"🔴 **Заказ отменен клиентом!**\n\n"
+        f"Пользователь <b>{user_info}</b> самостоятельно отменил заказ №<b>{order_id}</b>."
+    )
+    
+    # Можно добавить кнопку для перехода к заказу в WP
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔗 Посмотреть заказ в WP", url=f"{settings.WP_URL}/wp-admin/post.php?post={order_id}&action=edit")
+    
+    await bot.send_message(
+        chat_id=settings.ADMIN_CHAT_ID,
+        text=message,
+        reply_markup=builder.as_markup()
+    )
