@@ -162,6 +162,7 @@ async def get_products(
                 # используем полноразмерное изображение как fallback.
                 if p_data.get("images") and p_data["images"][0]:
                     thumbnail_url = p_data["images"][0].get("src")
+                logger.info("Not woocommerce_thumbnail")
 
             # Подменяем "сырой" список изображений на один thumbnail
             if thumbnail_url:
