@@ -72,7 +72,6 @@ async def command_start_handler(message: Message, command: CommandObject) -> Non
     db: Session = next(get_db())
     try:
         db_user = await auth_service.register_or_get_user(
-            db=db,
             user_info=message.from_user.model_dump(),
             referral_code=referral_code
         )
