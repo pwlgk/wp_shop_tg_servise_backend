@@ -1,5 +1,23 @@
-<?php
-// Этот код должен идти ПОСЛЕ стандартного кода вашей темы.
+/**
+ * Гарантирует, что сессия и корзина WooCommerce инициализированы.
+ * Необходимо для работы с корзиной в headless-режиме.
+ */
+function ensure_wc_session() {
+    if ( ! did_action('woocommerce_init') ) {
+        // Если хук woocommerce_init еще не сработал, вызываем его
+        do_action('woocommerce_init');
+    }
+    if ( is_null( WC()->session ) ) {
+        WC()->session = new WC_Session_Handler();
+        WC()->session->init();
+    }
+    if ( is_null( WC()->customer ) ) {
+        WC()->customer = new WC_Customer( get_current_user_id(), true );
+    }
+    if ( is_null( WC()->cart ) ) {
+        WC()->cart = new WC_Cart();
+    }
+}
 
 // --- НАЧАЛО НАШЕГО КАСТОМНОГО КОДА ---
 
@@ -15,12 +33,11 @@ add_action('rest_api_init', 'register_headless_api_routes');
 /**
  * Класс для создания кастомных REST API эндпоинтов для headless-магазина.
  */
-class Head-less_API_Controller extends WP_REST_Controller {
+class Headless_API_Controller extends WP_REST_Controller {
 
     protected $namespace = 'headless-api/v1';
 
     public function register_routes() {
-        // Эндпоинт для создания заказов
         register_rest_route($this->namespace, '/orders', array(
             array(
                 'methods'             => WP_REST_Server::CREATABLE,
@@ -28,158 +45,152 @@ class Head-less_API_Controller extends WP_REST_Controller {
                 'permission_callback' => '__return_true',
             ),
         ));
-        // Эндпоинт для обновления настроек
-        register_rest_route($this->namespace, '/settings', array(
-            array(
-                'methods'             => WP_REST_Server::EDITABLE,
-                'callback'            => array($this, 'update_settings'),
-                'permission_callback' => '__return_true',
-            ),
-        ));
-        // Эндпоинт для валидации купонов
-        register_rest_route($this->namespace, '/coupons/validate', array(
-            array(
-                'methods'             => WP_REST_Server::CREATABLE,
-                'callback'            => array($this, 'validate_coupon'),
-                'permission_callback' => '__return_true',
-            ),
-        ));
-        // Эндпоинт для создания кастомных купонов
-        register_rest_route($this->namespace, '/coupons', array(
-            array(
-                'methods'             => WP_REST_Server::CREATABLE,
-                'callback'            => array($this, 'create_coupon'),
-                'permission_callback' => '__return_true',
-            ),
-        ));
+    register_rest_route($this->namespace, '/settings', array(
+        array(
+            'methods'             => WP_REST_Server::EDITABLE, // Это 'POST', 'PUT', 'PATCH'
+            'callback'            => array($this, 'update_settings'),
+            'permission_callback' => '__return_true', // Защищено паролем приложения
+        ),
+    ));
+
+      register_rest_route($this->namespace, '/coupons/validate', array(
+        array(
+            'methods'             => WP_REST_Server::CREATABLE, // POST
+            'callback'            => array($this, 'validate_coupon'),
+            'permission_callback' => '__return_true',
+        ),
+    ));
+
     }
 
-    /**
-     * Валидирует купон и возвращает информацию о нем.
-     */
-    public function validate_coupon($request) {
-        $params = $request->get_json_params();
-        $coupon_code = isset($params['coupon_code']) ? wc_clean(wp_unslash($params['coupon_code'])) : '';
-        $cart_total = isset($params['cart_total']) ? (float)$params['cart_total'] : 0.0;
+// functions.php, в классе Headless_API_Controller
 
-        if (empty($coupon_code)) {
-            return new WP_Error('bad_request', 'Промокод не указан.', array('status' => 400));
-        }
+public function validate_coupon($request) {
+    $params = $request->get_json_params();
+    $coupon_code = isset($params['coupon_code']) ? wc_clean(wp_unslash($params['coupon_code'])) : '';
+    $line_items = isset($params['line_items']) ? $params['line_items'] : [];
+    $customer_id = isset($params['customer_id']) ? absint($params['customer_id']) : 0;
 
-        $coupon = new WC_Coupon($coupon_code);
+    $log_marker = '[COUPON_VALIDATION]'; // Маркер для поиска в логах
 
-        if (!$coupon->get_id()) {
-            return new WP_Error('invalid_coupon_code', 'Промокод не найден.', array('status' => 404));
-        }
-        
-        $validation_result = $coupon->is_valid();
-        if (is_wp_error($validation_result)) {
-             return new WP_Error('coupon_not_usable', $validation_result->get_error_message(), array('status' => 400));
-        }
+    error_log("{$log_marker} --- Start ---");
+    error_log("{$log_marker} Coupon Code: '{$coupon_code}', Customer ID: {$customer_id}");
+    error_log("{$log_marker} Line Items Received: " . json_encode($line_items));
 
-        $min_amount = (float) $coupon->get_minimum_amount();
-        if ($min_amount > 0 && $cart_total < $min_amount) {
-            $message = sprintf('Минимальная сумма для этого промокода: %s %s.', $min_amount, get_woocommerce_currency_symbol());
-            return new WP_Error('coupon_minimum_amount', $message, array('status' => 400));
-        }
-
-        $max_amount = (float) $coupon->get_maximum_amount();
-        if ($max_amount > 0 && $cart_total > $max_amount) {
-            $message = sprintf('Этот промокод не действует для заказов на сумму свыше %s %s.', $max_amount, get_woocommerce_currency_symbol());
-            return new WP_Error('coupon_maximum_amount', $message, array('status' => 400));
-        }
-
-        // --- ИСПРАВЛЕНИЕ: СОБИРАЕМ ОТВЕТ ВРУЧНУЮ ---
-        $response_data = array(
-            'id'                          => $coupon->get_id(),
-            'code'                        => $coupon->get_code(),
-            'amount'                      => $coupon->get_amount(),
-            'discount_type'               => $coupon->get_discount_type(),
-            'description'                 => $coupon->get_description(),
-            'date_expires'                => $coupon->get_date_expires() ? $coupon->get_date_expires()->format('c') : null,
-            'usage_count'                 => $coupon->get_usage_count(),
-            'individual_use'              => $coupon->get_individual_use(),
-            'product_ids'                 => $coupon->get_product_ids(),
-            'excluded_product_ids'        => $coupon->get_excluded_product_ids(),
-            'usage_limit'                 => $coupon->get_usage_limit(),
-            'usage_limit_per_user'        => $coupon->get_usage_limit_per_user(),
-            'limit_usage_to_x_items'      => $coupon->get_limit_usage_to_x_items(),
-            'free_shipping'               => $coupon->get_free_shipping(),
-            'product_categories'          => $coupon->get_product_categories(),
-            'excluded_product_categories' => $coupon->get_excluded_product_categories(),
-            'exclude_sale_items'          => $coupon->get_exclude_sale_items(),
-            'minimum_amount'              => $coupon->get_minimum_amount(),
-            'maximum_amount'              => $coupon->get_maximum_amount(),
-            'email_restrictions'          => $coupon->get_email_restrictions(),
-        );
-
-        return new WP_REST_Response($response_data, 200);
+    if (empty($coupon_code)) {
+        return new WP_Error('bad_request', 'Coupon code is required.', array('status' => 400));
     }
 
-    /**
-     * Создает кастомный купон (например, для рефералов).
-     */
-    public function create_coupon($request) {
-        $params = $request->get_json_params();
-        
-        if (empty($params['type']) || empty($params['amount'])) {
-            return new WP_Error('bad_request', 'Type and amount are required.', array('status' => 400));
-        }
-        
-        $code = !empty($params['code']) ? $params['code'] : 'REF_' . strtoupper(wp_generate_password(8, false));
+    $coupon = new WC_Coupon($coupon_code);
+    if (!$coupon->get_id()) {
+        error_log("{$log_marker} Result: Coupon with code '{$coupon_code}' not found.");
+        return new WP_Error('invalid_coupon_code', 'Промокод не найден.', array('status' => 404));
+    }
+    error_log("{$log_marker} Coupon object created successfully. Type: {$coupon->get_discount_type()}, Amount: {$coupon->get_amount()}");
 
-        $coupon_data = [
-            'code' => $code,
-            'discount_type' => sanitize_text_field($params['type']),
-            'amount' => sanitize_text_field($params['amount']),
-            'individual_use' => true,
-            'usage_limit' => 1,
-            'usage_limit_per_user' => 1,
-        ];
-        
-        if (!empty($params['email'])) {
-            $coupon_data['email_restrictions'] = [sanitize_email($params['email'])];
+    // --- ЛОГИКА С ВРЕМЕННЫМ ЗАКАЗОМ ---
+    $temp_order = null;
+    try {
+        // 1. Создаем временный заказ
+        $temp_order = wc_create_order([
+            'status' => 'checkout-draft',
+            'customer_id' => $customer_id,
+        ]);
+
+        if (is_wp_error($temp_order)) {
+            throw new Exception('Could not create temporary order object.');
         }
-        if (!empty($params['expires_in_days'])) {
-            $expiry_date = date('Y-m-d', strtotime('+' . absint($params['expires_in_days']) . ' days'));
-            $coupon_data['date_expires'] = $expiry_date;
+        error_log("{$log_marker} Temporary order created with ID: " . $temp_order->get_id());
+
+        // 2. Наполняем его товарами
+        if(empty($line_items)) {
+            throw new Exception('Line items are required for validation.');
+        }
+        foreach ($line_items as $item) {
+            $product = wc_get_product(absint($item['product_id']));
+            if ($product) {
+                $temp_order->add_product($product, absint($item['quantity']));
+            }
+        }
+        $temp_order->calculate_totals(); // Рассчитываем сумму ДО применения купона
+        error_log("{$log_marker} Temporary order filled. Subtotal: " . $temp_order->get_subtotal());
+
+        // 3. Пытаемся применить купон. Это самый надежный метод валидации.
+        $apply_result = $temp_order->apply_coupon($coupon_code);
+        error_log("{$log_marker} apply_coupon('{$coupon_code}') result: " . json_encode($apply_result));
+
+        if (is_wp_error($apply_result)) {
+            // Если apply_coupon вернул объект ошибки
+            throw new Exception($apply_result->get_error_message());
+        }
+        if ($apply_result === false) {
+             // Если вернулся просто false
+            throw new Exception('Промокод не применим к товарам в вашей корзине.');
         }
 
-        $coupon = new WC_Coupon();
-        $coupon->set_props($coupon_data);
-        $coupon_id = $coupon->save();
+        // 4. Пересчитываем итоги и получаем скидку
+        $temp_order->calculate_totals();
+        $discount_amount = $temp_order->get_discount_total();
+        error_log("{$log_marker} Totals recalculated. Final discount amount: {$discount_amount}");
 
-        if (is_wp_error($coupon_id)) {
-            return $coupon_id;
+        // 5. Обязательно удаляем временный заказ
+        wp_delete_post($temp_order->get_id(), true);
+        error_log("{$log_marker} Temporary order " . $temp_order->get_id() . " deleted.");
+        $temp_order = null; // Обнуляем, чтобы не удалить дважды в блоке finally
+
+    } catch (Exception $e) {
+        $error_message = $e->getMessage();
+        error_log("{$log_marker} ERROR: {$error_message}");
+        // Если на любом этапе произошла ошибка, убеждаемся, что временный заказ удален
+        if ($temp_order && $temp_order->get_id()) {
+            wp_delete_post($temp_order->get_id(), true);
+            error_log("{$log_marker} Temporary order " . $temp_order->get_id() . " deleted due to an error.");
         }
+        return new WP_Error('coupon_not_applicable', $error_message, array('status' => 400));
+    }
+    // ------------------------------------
+    
+    $response_data = [
+        'code' => $coupon->get_code(),
+        'amount' => $coupon->get_amount(),
+        'discount_type' => $coupon->get_discount_type(),
+        'description' => $coupon->get_description(),
+        'discount_amount' => round((float)$discount_amount, 2)
+    ];
+    
+    error_log("{$log_marker} --- Success. Returning data: " . json_encode($response_data) . " ---");
+    return new WP_REST_Response($response_data, 200);
+}
 
-        return new WP_REST_Response(['id' => $coupon_id, 'code' => $coupon->get_code()], 201);
+/**
+ * Обновляет поля ACF на странице настроек.
+ */
+public function update_settings($request) {
+    // ID нашей страницы настроек
+    $settings_page_id = 329; // <-- ЗАМЕНИТЕ НА ВАШ ID
+    
+    $params = $request->get_json_params();
+    $updated_fields = [];
+
+    // Обновляем только те поля, которые были переданы
+    if (isset($params['welcome_bonus_amount'])) {
+        update_field('welcome_bonus_amount', (int)$params['welcome_bonus_amount'], $settings_page_id);
+        $updated_fields[] = 'welcome_bonus_amount';
+    }
+    if (isset($params['is_welcome_bonus_active'])) {
+        update_field('is_welcome_bonus_active', (bool)$params['is_welcome_bonus_active'], $settings_page_id);
+        $updated_fields[] = 'is_welcome_bonus_active';
     }
 
-    /**
-     * Обновляет поля ACF на странице настроек.
-     */
-    public function update_settings($request) {
-        $settings_page_id = 329; // Убедитесь, что ID вашей страницы настроек верный
-        $params = $request->get_json_params();
-        $updated_fields = [];
-
-        if (isset($params['welcome_bonus_amount'])) {
-            update_field('welcome_bonus_amount', absint($params['welcome_bonus_amount']), $settings_page_id);
-            $updated_fields[] = 'welcome_bonus_amount';
-        }
-        if (isset($params['is_welcome_bonus_active'])) {
-            update_field('is_welcome_bonus_active', (bool)$params['is_welcome_bonus_active'], $settings_page_id);
-            $updated_fields[] = 'is_welcome_bonus_active';
-        }
-        // Добавьте сюда другие поля настроек при необходимости
-
-        if (empty($updated_fields)) {
-            return new WP_Error('bad_request', 'No valid fields to update.', array('status' => 400));
-        }
-
-        return new WP_REST_Response(['status' => 'ok', 'updated' => $updated_fields], 200);
+    if (empty($updated_fields)) {
+        return new WP_Error('bad_request', 'No valid fields to update.', array('status' => 400));
     }
+
+    // Сбрасываем кеш настроек в FastAPI (через веб-хук)
+    // Это продвинутый шаг, пока можно обойтись TTL
+
+    return new WP_REST_Response(['status' => 'ok', 'updated' => $updated_fields], 200);
+}
 
     /**
      * Основная логика создания заказа.
@@ -208,17 +219,6 @@ class Head-less_API_Controller extends WP_REST_Controller {
             if (!empty($params['shipping'])) {
                 $order->set_address($params['shipping'], 'shipping');
             }
-            
-            // ИСПРАВЛЕНО: Добавление доставки
-            if (!empty($params['shipping_lines'])) {
-                foreach($params['shipping_lines'] as $shipping_line_data) {
-                    $shipping_rate = new WC_Order_Item_Shipping();
-                    $shipping_rate->set_method_title($shipping_line_data['method_title']);
-                    $shipping_rate->set_method_id($shipping_line_data['method_id']);
-                    $shipping_rate->set_total($shipping_line_data['total']);
-                    $order->add_item($shipping_rate);
-                }
-            }
 
             $payment_method_id = sanitize_text_field($params['payment_method_id']);
             $payment_gateways = WC()->payment_gateways->payment_gateways();
@@ -242,7 +242,9 @@ class Head-less_API_Controller extends WP_REST_Controller {
                 $coupon = new WC_Coupon();
                 $coupon->set_code($coupon_code);
                 $coupon->set_discount_type('fixed_cart');
-                $coupon->set_amount($points_to_spend); // ИСПРАВЛЕНО: убрана опечатка
+                // --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+                $coupon->set_amount($points_to_spend);
+                // -------------------------
                 $coupon->set_individual_use(true);
                 $coupon->set_usage_limit(1);
                 $coupon->save();
@@ -261,6 +263,7 @@ class Head-less_API_Controller extends WP_REST_Controller {
 
             if ($payment_method_id === 'robokassa') {
                 $order_status = 'pending';
+                
                 $robokassa_settings = get_option('woocommerce_robokassa_settings');
                 $merchant_login = $robokassa_settings['merchant_login'];
                 $password_1 = $robokassa_settings['password_1'];
@@ -313,80 +316,213 @@ class Head-less_API_Controller extends WP_REST_Controller {
 
         $billing_address = $order->get_address('billing');
     
-        if (empty($billing_address['first_name']) && $order->get_customer_id()) {
-            $billing_address['first_name'] = get_user_meta($order->get_customer_id(), 'first_name', true);
-        }
-        if (empty($billing_address['last_name']) && $order->get_customer_id()) {
-            $billing_address['last_name'] = get_user_meta($order->get_customer_id(), 'last_name', true);
-        }
-        
-        $customer_id = $order->get_customer_id();
-        $telegram_id = null;
-        if ($customer_id) {
-            $email = get_user_meta($customer_id, 'billing_email', true);
+    // Если имя или фамилия в адресе пустые, пытаемся "подтянуть" их
+    // из основного профиля пользователя.
+    if (empty($billing_address['first_name']) && $order->get_customer_id()) {
+        $billing_address['first_name'] = get_user_meta($order->get_customer_id(), 'first_name', true);
+    }
+    if (empty($billing_address['last_name']) && $order->get_customer_id()) {
+        $billing_address['last_name'] = get_user_meta($order->get_customer_id(), 'last_name', true);
+    }
+    // -------------------------
+     $customer_id = $order->get_customer_id();
+    $telegram_id = null;
+    if ($customer_id) {
+        // Предполагаем, что мы сохраняем telegram_id в мета-поле 'telegram_id'
+        // Если вы его не сохраняете, его можно взять из email'а, который мы генерируем
+        $telegram_id_meta = get_user_meta($customer_id, 'telegram_id', true);
+        if (!empty($telegram_id_meta)) {
+            $telegram_id = (int)$telegram_id_meta;
+        } else {
+            // Пытаемся извлечь из email'а как запасной вариант
+            $email = $order->get_billing_email();
             if (strpos($email, '@telegram.user') !== false) {
                 $telegram_id = (int)str_replace('@telegram.user', '', $email);
             }
         }
-        
-        return [
-            'id'                   => $order->get_id(),
-            'number'               => $order->get_order_number(),
-            'status'               => $order->get_status(),
-            'date_created'         => wc_rest_prepare_date_response($order->get_date_created()),
-            'total'                => (string) $order->get_total(),
-            'payment_method_title' => $order->get_payment_method_title(),
-            'billing'              => $billing_address,
-            'line_items'           => $line_items_data,
-            'customer_telegram_id' => $telegram_id
-        ];
     }
-}
+    return [
+        'id'                   => $order->get_id(),
+        'number'               => $order->get_order_number(),
+        'status'               => $order->get_status(),
+        'date_created'         => wc_rest_prepare_date_response($order->get_date_created()),
+        'total'                => (string) $order->get_total(),
+        'payment_method_title' => $order->get_payment_method_title(),
+        'billing'              => $billing_address, // <-- Используем дополненный адрес
+        'line_items'           => $line_items_data,
+        'customer_telegram_id' => $telegram_id // <-- Новое поле в ответе
+
+    ];
+}}
+
 
 
 /**
- * Отправляет веб-хук в FastAPI при публикации акции.
+ * Отправляет веб-хук в FastAPI сервис при публикации
+ * или обновлении записи типа 'promo' (Акция).
  */
 function trigger_promo_webhook_on_publish($post_id, $post, $update) {
+    // Убеждаемся, что это тип записи 'promo' и статус 'publish'
     if ($post->post_type !== 'promo' || $post->post_status !== 'publish') {
         return;
     }
 
-    $webhook_url = 'https://7d6d7fa8980a.ngrok-free.app/internal/webhooks/promo-created';
-    $secret = '5d2f20ec6eda4990cd61739ef81647e0e7e6b27ba877bd0881016ff5c11b39f6';
+    // `!$update` означает, что это первая публикация, а не обновление.
+    // Вы можете решить, отправлять ли хук только при первой публикации
+    // или при каждом обновлении. Давайте отправлять при каждом.
+    // if ($update === false) { // Раскомментируйте, если нужно только при создании
+
+    // URL нашего FastAPI эндпоинта
+    $webhook_url = 'https://api.app.ttfg.ru/internal/webhooks/promo-created'; // <-- ЗАМЕНИТЕ НА ВАШ URL
+    
+    // Секрет для аутентификации (опционально, но рекомендуется)
+    $secret = '5d2f20ec6eda4990cd61739ef81647e0e7e6b27ba877bd0881016ff5c11b39f6'; // <-- ЗАМЕНИТЕ НА СВОЙ СЕКРЕТ
 
     $body = json_encode(['promo_id' => $post_id]);
+
     $args = array(
         'body'        => $body,
         'headers'     => array(
             'Content-Type' => 'application/json',
-            'X-Webhook-Secret' => $secret
+            'X-Webhook-Secret' => $secret // Кастомный заголовок для проверки
         ),
         'timeout'     => 15,
-        'blocking'    => false,
+        'redirection' => 5,
+        'blocking'    => false, // <-- Очень важно! Делаем запрос неблокирующим
+        'httpversion' => '1.0',
+        'sslverify'   => true, // Оставьте true для продакшена
+        'data_format' => 'body',
     );
 
+    // Отправляем запрос
     $response = wp_remote_post($webhook_url, $args);
 
+    // Логирование для отладки (можно посмотреть в error_log вашего сервера)
     if (is_wp_error($response)) {
         error_log('Promo Webhook Error: ' . $response->get_error_message());
     } else {
         error_log('Promo Webhook Sent Successfully for promo ID: ' . $post_id);
     }
+    
+    // } // Закрывающая скобка для if ($update === false)
 }
+
+// "Вешаемся" на хук, который срабатывает при сохранении любого поста/страницы/cpt
+// 10 - приоритет, 3 - количество аргументов, которые мы хотим получить
 add_action('save_post', 'trigger_promo_webhook_on_publish', 10, 3);
 
 
 /**
- * Модифицирует аргументы регистрации CPT 'banner' для поддержки ACF.
+ * Регистрирует новое событие в WP-Cron, если оно еще не запланировано.
  */
-function modify_banner_cpt_args($args, $post_type) {
-    if ($post_type === 'banner') {
-        $args['show_in_rest'] = true;
-        if (!in_array('custom-fields', $args['supports'])) {
-            $args['supports'][] = 'custom-fields';
+if (!wp_next_scheduled('cleanup_draft_orders_event')) {
+    // Запускать каждый час
+    wp_schedule_event(time(), 'hourly', 'cleanup_draft_orders_event');
+}
+
+/**
+ * Привязывает нашу функцию очистки к этому событию.
+ */
+add_action('cleanup_draft_orders_event', 'cleanup_old_draft_orders');
+
+/**
+ * Основная функция, которая находит и удаляет старые заказы-черновики.
+ */
+function cleanup_old_draft_orders() {
+    error_log('[CLEANUP_DRAFTS] Starting cleanup of old draft orders...');
+
+    // Ищем заказы со статусом 'checkout-draft'
+    $args = array(
+        'post_type'   => 'shop_order',
+        'post_status' => 'wc-checkout-draft',
+        'posts_per_page' => 100, // Обрабатываем до 100 за раз
+        'date_query'  => array(
+            array(
+                // Которые были созданы более 1 часа назад
+                'before' => '1 hour ago',
+                'inclusive' => true,
+            ),
+        ),
+        'fields' => 'ids', // Получаем только ID для производительности
+    );
+
+    $draft_orders_query = new WP_Query($args);
+
+    if ($draft_orders_query->have_posts()) {
+        $deleted_count = 0;
+        foreach ($draft_orders_query->posts as $order_id) {
+            // Удаляем безвозвратно, минуя корзину
+            $deleted = wp_delete_post($order_id, true);
+            if ($deleted) {
+                $deleted_count++;
+            }
         }
+        error_log("[CLEANUP_DRAFTS] Deleted {$deleted_count} old draft orders.");
+    } else {
+        error_log('[CLEANUP_DRAFTS] No old draft orders found to delete.');
     }
+}
+
+/**
+ * Исключает заказы со статусом 'checkout-draft' из всех
+ * ответов WooCommerce REST API для эндпоинта /orders.
+ * Это самый надежный способ.
+ */
+function exclude_draft_orders_from_rest_api($args, $request) {
+    // Получаем все существующие `tax_query`
+    $tax_query = isset($args['tax_query']) ? $args['tax_query'] : array();
+
+    // Добавляем наше условие: статус НЕ должен быть 'checkout-draft'
+    $tax_query[] = array(
+        'taxonomy' => 'shop_order_status',
+        'field'    => 'slug',
+        'terms'    => array('checkout-draft'),
+        'operator' => 'NOT IN',
+    );
+
+    $args['tax_query'] = $tax_query;
+
     return $args;
 }
-add_filter('register_post_type_args', 'modify_banner_cpt_args', 10, 2);
+add_filter('woocommerce_rest_order_query', 'exclude_draft_orders_from_rest_api', 10, 2);
+
+/**
+ * "Обогащает" REST API ответ для кастомных типов записей.
+ * Заменяет ID медиафайлов из полей ACF на их полные URL.
+ */
+function enrich_media_rest_response($response, $post, $request) {
+    // Проверяем, есть ли у ответа ключ 'acf'
+    if (isset($response->data['acf'])) {
+
+        // --- Обрабатываем поля для Баннеров ---
+        $image_id_banner = $response->data['acf']['banner_image'];
+        if (!empty($image_id_banner) && is_numeric($image_id_banner)) {
+            $response->data['acf']['banner_image'] = wp_get_attachment_url($image_id_banner);
+        }
+        $video_id_banner = $response->data['acf']['banner_video'];
+        if (!empty($video_id_banner) && is_numeric($video_id_banner)) {
+            $response->data['acf']['banner_video'] = wp_get_attachment_url($video_id_banner);
+        }
+
+        // --- Обрабатываем поля для Сторисов ---
+        $image_id_story = $response->data['acf']['story_image'];
+        if (!empty($image_id_story) && is_numeric($image_id_story)) {
+            $response->data['acf']['story_image'] = wp_get_attachment_url($image_id_story);
+        }
+        $video_id_story = $response->data['acf']['story_video'];
+        if (!empty($video_id_story) && is_numeric($video_id_story)) {
+            $response->data['acf']['story_video'] = wp_get_attachment_url($video_id_story);
+        }
+        $image_id_promo = $response->data['acf']['promo_image']; // <-- Имя поля должно быть promo_image
+    if (!empty($image_id_promo) && is_numeric($image_id_promo)) {
+        $response->data['acf']['promo_image'] = wp_get_attachment_url($image_id_promo);
+    }
+    }
+
+    return $response;
+}
+
+// "Вешаемся" на хуки для обоих типов записей
+add_filter('rest_prepare_banner', 'enrich_media_rest_response', 10, 3);
+add_filter('rest_prepare_story', 'enrich_media_rest_response', 10, 3); 
+add_filter('rest_prepare_promo', 'enrich_media_rest_response', 10, 3);

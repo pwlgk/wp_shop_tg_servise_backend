@@ -42,7 +42,7 @@ async def get_dashboard_stats(db: Session):
         processing_orders_resp = await wc_client.get("wc/v3/orders", params={"status": "processing"})
         processing_orders_count = int(processing_orders_resp.headers.get("X-WP-Total", 0))
         
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0).isoformat()
+        today_start = datetime.utcnow().strftime('%Y-%m-%d')
         reports_resp = await wc_client.get("wc/v3/reports/sales", params={"date_min": today_start})
         sales_today_data = reports_resp.json()
         sales_today = float(sales_today_data[0].get("total_sales", 0.0)) if sales_today_data else 0.0

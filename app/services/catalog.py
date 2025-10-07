@@ -122,7 +122,7 @@ async def get_products(
     # 3. Формируем словарь параметров для WooCommerce API.
     params = {
         "page": page, "per_page": size,
-        "status": "publish", "stock_status": "instock"
+        "status": "publish", "stock_status": "instock", "_embed": "wp:featuredmedia"
     }
     
     # Поиск по SKU имеет приоритет над текстовым поиском.
@@ -149,6 +149,26 @@ async def get_products(
     enriched_products = []
     if products_data and isinstance(products_data, list):
         for p_data in products_data:
+            # --- НОВАЯ ЛОГИКА ИЗВЛЕЧЕНИЯ УМЕНЬШЕННОГО ИЗОБРАЖЕНИЯ ---
+            thumbnail_url = None
+            try:
+                # Пытаемся найти уменьшенную копию в `_embedded` блоке
+                media_details = p_data["_embedded"]["wp:featuredmedia"][0]["media_details"]
+                # `woocommerce_thumbnail` - это стандартный размер WooCommerce
+                thumbnail_url = media_details["sizes"]["woocommerce_thumbnail"]["source_url"]
+            except (KeyError, IndexError):
+                # Если что-то пошло не так (нет картинки, нет нужного размера),
+                # используем полноразмерное изображение как fallback.
+                if p_data.get("images") and p_data["images"][0]:
+                    thumbnail_url = p_data["images"][0].get("src")
+
+            # Подменяем "сырой" список изображений на один thumbnail
+            if thumbnail_url:
+                p_data["images"] = [{"id": 0, "src": thumbnail_url, "alt": ""}]
+            else:
+                p_data["images"] = [] # Если изображений нет вообще
+            # ----------------------------------------------------
+
             try:
                 product_obj = Product.model_validate(p_data)
                 product_obj.is_favorite = product_obj.id in favorite_product_ids
