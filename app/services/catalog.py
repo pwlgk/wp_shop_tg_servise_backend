@@ -1,5 +1,6 @@
 # app/services/catalog.py
 
+import asyncio
 import json
 import logging
 from typing import List, Optional
@@ -14,63 +15,114 @@ logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 600  # 10 минут
 
-
 async def get_all_categories(redis: Redis) -> List[ProductCategory]:
     """
-    Получает иерархический список всех категорий товаров, используя кеш.
+    Получает иерархический список категорий, фильтруя ветки без товаров в наличии.
     """
-    cache_key = "categories:hierarchical:all" # Используем новый ключ кеша
+    cache_key = "categories:hierarchical:all:with_stock_v6"
     
     cached_categories = await redis.get(cache_key)
     if cached_categories:
+        logger.info("Serving categories from cache.")
         return [ProductCategory.model_validate(cat) for cat in json.loads(cached_categories)]
             
-    # 1. Получаем ВСЕ категории плоским списком от WooCommerce
-    # `per_page=100` - чтобы получить все за один раз (увеличьте, если категорий больше)
-    response = await wc_client.get("wc/v3/products/categories", params={"per_page": 100, "hide_empty": True})
-    categories_data = response.json()
+    logger.info("--- Starting category tree build process ---")
     
-    # --- НОВАЯ ЛОГИКА ПОСТРОЕНИЯ ДЕРЕВА ---
+    # 1. Получаем ВСЕ категории ОДНИМ запросом
+    logger.info("Fetching all categories from WooCommerce in a flat list...")
+    response = await wc_client.get("wc/v3/products/categories", params={"per_page": 100})
+    all_categories_data = response.json()
+
+    if not all_categories_data:
+        logger.warning("Received empty category list from WooCommerce. Returning empty list.")
+        return []
     
-    # 2. Создаем словарь для быстрого доступа к категориям по ID и для хранения дочерних
+    logger.info(f"Fetched {len(all_categories_data)} total categories.")
+
+    # 2. Строим полное дерево в памяти
     categories_map = {}
-    root_categories = [] # Список для категорий верхнего уровня (у которых parent=0)
+    root_categories_data = []
 
-    # Первый проход: создаем объекты Pydantic и раскладываем их по словарю
-    for cat_data in categories_data:
-        image_src = cat_data.get("image", {}).get("src") if cat_data.get("image") else None
-        category_obj = ProductCategory(
-            id=cat_data['id'],
-            name=cat_data['name'],
-            slug=cat_data['slug'],
-            image_src=image_src,
-            children=[] # Инициализируем пустым списком
-        )
-        categories_map[category_obj.id] = category_obj
+    for cat_data in all_categories_data:
+        try:
+            category_obj = ProductCategory.model_validate(cat_data)
+            categories_map[category_obj.id] = category_obj
+        except Exception as e:
+            logger.warning(f"Skipping category due to validation error for cat ID {cat_data.get('id')}: {e}")
+            continue
 
-    # Второй проход: строим иерархию
-    for cat_data in categories_data:
-        category_id = cat_data['id']
+    for cat_data in all_categories_data:
+        category_id = cat_data.get('id')
+        if category_id not in categories_map:
+            continue
+            
         parent_id = cat_data.get('parent', 0)
-        
         current_category = categories_map[category_id]
         
         if parent_id == 0:
-            # Это категория верхнего уровня
-            root_categories.append(current_category)
+            root_categories_data.append(current_category)
         elif parent_id in categories_map:
-            # Если родитель существует, добавляем текущую категорию в его `children`
             parent_category = categories_map[parent_id]
+            # Убедимся, что children - это список
+            if not isinstance(parent_category.children, list):
+                parent_category.children = []
             parent_category.children.append(current_category)
-    
-    # -----------------------------------
-    
-    # Сохраняем в кеш уже древовидную структуру
-    # Pydantic v2 `model_dump` рекурсивно преобразует вложенные объекты
-    await redis.set(cache_key, json.dumps([cat.model_dump() for cat in root_categories]), ex=CACHE_TTL_SECONDS)
-    
-    return root_categories
 
+    logger.info(f"Built a full tree with {len(root_categories_data)} root categories.")
+
+    # 3. Рекурсивно фильтруем "мертвые" ветки
+    final_tree = _filter_empty_category_branches(root_categories_data)
+    logger.info(f"Filtered tree down to {len(final_tree)} valid root categories.")
+    
+    # 4. Кешируем и возвращаем результат
+    await redis.set(cache_key, json.dumps([cat.model_dump(mode='json') for cat in final_tree]), ex=CACHE_TTL_SECONDS)
+    
+    logger.info("--- Finished category tree build process ---")
+    return final_tree
+
+
+def _is_category_branch_valid(category: ProductCategory) -> bool:
+    """
+    Рекурсивно проверяет, является ли ветка категорий "валидной".
+    Ветка валидна, если сама категория имеет товары в наличии,
+    ИЛИ хотя бы одна из ее дочерних веток валидна.
+    """
+    # Логируем проверку для текущей категории
+    logger.debug(f"Checking validity for category '{category.name}' (ID: {category.id}). Has stock: {category.has_in_stock_products}")
+
+    if category.has_in_stock_products:
+        logger.debug(f"Category '{category.name}' is valid because it has products in stock.")
+        return True
+    
+    if not category.children:
+        logger.debug(f"Category '{category.name}' is invalid because it has no stock and no children.")
+        return False
+        
+    # Рекурсивно проверяем детей
+    is_any_child_valid = any(_is_category_branch_valid(child) for child in category.children)
+    if is_any_child_valid:
+        logger.debug(f"Category '{category.name}' is valid because it has at least one valid child branch.")
+    else:
+        logger.debug(f"Category '{category.name}' is invalid because it has no stock and all its children are invalid.")
+        
+    return is_any_child_valid
+
+
+def _filter_empty_category_branches(categories: List[ProductCategory]) -> List[ProductCategory]:
+    """
+    Рекурсивно фильтрует дерево категорий, удаляя "мертвые" ветки.
+    """
+    valid_branches = []
+    for category in categories:
+        # Сначала всегда фильтруем детей
+        if category.children:
+            category.children = _filter_empty_category_branches(category.children)
+        
+        # Теперь, когда дети "очищены", проверяем, валидна ли текущая ветка
+        if _is_category_branch_valid(category):
+            valid_branches.append(category)
+            
+    return valid_branches
 
 async def get_products(
     db: Session,

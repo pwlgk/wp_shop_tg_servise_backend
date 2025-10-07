@@ -11,7 +11,8 @@ class ProductCategory(BaseModel):
     slug: str
     image_src: Optional[str] = None
     children: List['ProductCategory'] = [] # <-- Добавляем поле для дочерних категорий
-
+    count: int
+    has_in_stock_products: bool = False
     class Config:
         from_attributes = True
 
