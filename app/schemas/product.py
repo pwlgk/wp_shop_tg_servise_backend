@@ -16,6 +16,15 @@ class ProductCategory(BaseModel):
     class Config:
         from_attributes = True
 
+class EmbeddedProductCategory(BaseModel):
+    """Упрощенная схема категории, как она приходит внутри объекта Product."""
+    id: int
+    name: str
+    slug: str
+
+    class Config:
+        from_attributes = True
+
 class ProductImage(BaseModel):
     id: int
     src: str
@@ -35,7 +44,7 @@ class Product(BaseModel):
     stock_quantity: int | None
     stock_status: str
     images: List[ProductImage]
-    categories: List[ProductCategory]
+    categories: List[EmbeddedProductCategory]
     is_favorite: bool = False # По умолчанию False
 
 
