@@ -17,9 +17,10 @@ CACHE_TTL_SECONDS = 600  # 10 минут
 
 async def get_all_categories(redis: Redis) -> List[ProductCategory]:
     """
-    Получает иерархический список категорий, фильтруя ветки без товаров в наличии.
+    Получает иерархический список категорий, фильтруя ветки без товаров в наличии,
+    и корректно извлекает URL изображений.
     """
-    cache_key = "categories:hierarchical:all:with_stock_v6"
+    cache_key = "categories:hierarchical:all:with_stock_v7"
     
     cached_categories = await redis.get(cache_key)
     if cached_categories:
@@ -45,27 +46,38 @@ async def get_all_categories(redis: Redis) -> List[ProductCategory]:
 
     for cat_data in all_categories_data:
         try:
-            category_obj = ProductCategory.model_validate(cat_data)
+            # --- ИСПРАВЛЕНИЕ ЗДЕСЬ: Извлекаем URL перед валидацией ---
+            image_obj = cat_data.get("image")
+            image_src = image_obj.get("src") if image_obj else None
+            
+            # Создаем Pydantic-объект, передавая ему уже подготовленные данные
+            category_obj = ProductCategory(
+                id=cat_data.get('id'),
+                name=cat_data.get('name'),
+                slug=cat_data.get('slug'),
+                image_src=image_src, # <-- Передаем извлеченный URL
+                count=cat_data.get('count', 0),
+                has_in_stock_products=cat_data.get('has_in_stock_products', False),
+                children=[]
+            )
+            # ----------------------------------------------------
             categories_map[category_obj.id] = category_obj
+
         except Exception as e:
-            logger.warning(f"Skipping category due to validation error for cat ID {cat_data.get('id')}: {e}")
+            logger.warning(f"Skipping category due to validation error for cat ID {cat_data.get('id')}", exc_info=True)
             continue
 
+    # Код построения иерархии остается без изменений
     for cat_data in all_categories_data:
         category_id = cat_data.get('id')
-        if category_id not in categories_map:
-            continue
-            
+        if category_id not in categories_map: continue
         parent_id = cat_data.get('parent', 0)
         current_category = categories_map[category_id]
-        
         if parent_id == 0:
             root_categories_data.append(current_category)
         elif parent_id in categories_map:
             parent_category = categories_map[parent_id]
-            # Убедимся, что children - это список
-            if not isinstance(parent_category.children, list):
-                parent_category.children = []
+            if not isinstance(parent_category.children, list): parent_category.children = []
             parent_category.children.append(current_category)
 
     logger.info(f"Built a full tree with {len(root_categories_data)} root categories.")
@@ -84,27 +96,20 @@ async def get_all_categories(redis: Redis) -> List[ProductCategory]:
 def _is_category_branch_valid(category: ProductCategory) -> bool:
     """
     Рекурсивно проверяет, является ли ветка категорий "валидной".
-    Ветка валидна, если сама категория имеет товары в наличии,
-    ИЛИ хотя бы одна из ее дочерних веток валидна.
     """
-    # Логируем проверку для текущей категории
     logger.debug(f"Checking validity for category '{category.name}' (ID: {category.id}). Has stock: {category.has_in_stock_products}")
-
     if category.has_in_stock_products:
-        logger.debug(f"Category '{category.name}' is valid because it has products in stock.")
+        logger.debug(f"Category '{category.name}' is valid on its own.")
         return True
-    
     if not category.children:
-        logger.debug(f"Category '{category.name}' is invalid because it has no stock and no children.")
+        logger.debug(f"Category '{category.name}' is invalid (no stock, no children).")
         return False
-        
-    # Рекурсивно проверяем детей
+    
     is_any_child_valid = any(_is_category_branch_valid(child) for child in category.children)
     if is_any_child_valid:
-        logger.debug(f"Category '{category.name}' is valid because it has at least one valid child branch.")
+        logger.debug(f"Category '{category.name}' is valid because it has a valid child branch.")
     else:
-        logger.debug(f"Category '{category.name}' is invalid because it has no stock and all its children are invalid.")
-        
+        logger.debug(f"Category '{category.name}' is invalid (no stock, all children invalid).")
     return is_any_child_valid
 
 
@@ -114,16 +119,11 @@ def _filter_empty_category_branches(categories: List[ProductCategory]) -> List[P
     """
     valid_branches = []
     for category in categories:
-        # Сначала всегда фильтруем детей
         if category.children:
             category.children = _filter_empty_category_branches(category.children)
-        
-        # Теперь, когда дети "очищены", проверяем, валидна ли текущая ветка
         if _is_category_branch_valid(category):
             valid_branches.append(category)
-            
     return valid_branches
-
 async def get_products(
     db: Session,
     redis: Redis,
