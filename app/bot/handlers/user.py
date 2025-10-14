@@ -73,9 +73,10 @@ async def command_start_handler(message: Message, command: CommandObject) -> Non
     db: Session = next(get_db())
     try:
         db_user = await auth_service.register_or_get_user(
-            user_info=message.from_user.model_dump(),
-            referral_code=referral_code
-        )
+                db=db, # <-- Передаем db
+                user_info=message.from_user.model_dump(),
+                referral_code=referral_code
+            )
         user_service.update_user_profile_from_telegram(db, db_user, message.from_user.model_dump())
         if not db_user.bot_accessible:
             logger.info(f"User {db_user.id} re-activated the bot. Setting bot_accessible to True.")
