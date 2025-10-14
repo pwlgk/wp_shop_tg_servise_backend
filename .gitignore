@@ -9,3 +9,4 @@ app.log
 *.lock
 .git*
 docker-compose.yml
+*.csv

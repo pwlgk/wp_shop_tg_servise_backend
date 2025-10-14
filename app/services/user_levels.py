@@ -10,8 +10,8 @@ import logging
 logger = logging.getLogger(__name__)
 # Настройки порогов для уровней. Можно вынести в config.py
 LEVEL_THRESHOLDS = {
-    "gold": 50000,
-    "silver": 10000,
+    "gold": 10000,
+    "silver": 5000,
     "bronze": 0
 }
 

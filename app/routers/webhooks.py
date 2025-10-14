@@ -219,15 +219,32 @@ async def order_updated_webhook(request: Request, db: Session = Depends(get_db))
                         related_entity_id=str(order_id)
                     )
         if order_status == "completed":
-            order_total = float(order_data.get("total", "0"))
-            points_added = loyalty_service.add_cashback_for_order(db, user, order_total, order_id)
-            if points_added and points_added > 0:
-                await bot_notification_service.send_points_earned(db, user, points_added, order_id)
-                crud_notification.create_notification(
-                    db, user_id=user.id, type="points_earned",
-                    title="Кешбэк начислен!", message=f"Вы получили {points_added} бонусных баллов за заказ №{order_id}.",
-                    related_entity_id=str(order_id)
-                )
+            
+            # --- НОВАЯ ПРОВЕРКА ---
+            # `coupon_lines` - это массив с примененными купонами.
+            # Если он не пустой, значит, в заказе была скидка.
+            coupon_lines = order_data.get("coupon_lines", [])
+            
+            if coupon_lines:
+                logger.info(f"Order {order_id} was completed with coupons. Skipping cashback accrual.")
+            else:
+                # Кешбэк начисляется, ТОЛЬКО если не было купонов
+                logger.info(f"Order {order_id} was completed without coupons. Accruing cashback.")
+                order_total = float(order_data.get("total", "0"))
+                points_added = loyalty_service.add_cashback_for_order(db, user, order_total, order_id)
+                
+                if points_added and points_added > 0:
+                    # Уведомления о начислении кешбэка
+                    await bot_notification_service.send_points_earned(db, user, points_added, order_id)
+                    crud_notification.create_notification(
+                        db, user_id=user.id, type="points_earned",
+                        title="Кешбэк начислен!", message=f"Вы получили {points_added} бонусных баллов за заказ №{order_id}.",
+                        related_entity_id=str(order_id)
+                    )
+            # --- КОНЕЦ НОВОЙ ПРОВЕРКИ ---
+
+            # Логика начисления реферального бонуса остается без изменений,
+            # так как она не зависит от кешбэка.
             await check_and_reward_referrer(db, user)
         elif order_status == "cancelled":
             logger.info(f"Order {order_id} was cancelled. Checking for spent points to refund.")

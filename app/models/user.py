@@ -2,7 +2,7 @@
 
 from sqlalchemy import Column, Date, Integer, String, Boolean, BIGINT, DateTime, func
 from sqlalchemy.orm import relationship
-
+from .referral import Referral
 from app.db.session import Base
 
 class User(Base):
