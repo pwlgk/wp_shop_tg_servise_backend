@@ -179,19 +179,29 @@ IGNORED_ORDER_STATUSES_FOR_USER_NOTIFICATION = {
 }
 
 @wc_router.post("/order-updated", dependencies=[Depends(verify_webhook_signature)])
-async def order_updated_webhook(request: Request, db: Session = Depends(get_db)):
-    """Обрабатывает обновления заказов, отправляет уведомления и начисляет бонусы."""
+async def order_updated_webhook(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Веб-хук для обработки обновлений заказов из WooCommerce.
+    Отправляет уведомления, начисляет кешбэк и реферальные бонусы.
+    """
     raw_body = await request.body()
-    if not raw_body: return {"status": "ok", "message": "Empty payload."}
     
+    if not raw_body:
+        return {"status": "ok", "message": "Empty payload."}
     try:
         order_data = json.loads(raw_body)
     except json.JSONDecodeError:
         return {"status": "ok", "message": "Invalid JSON payload."}
         
-    # logger.info(f"--- Order Updated Webhook Received ---\nBody:\n{json.dumps(order_data, indent=2)}\n------------------------------------")
+    logger.info(f"--- Order Updated Webhook Received ---\nBody:\n{json.dumps(order_data, indent=2)}\n------------------------------------")
 
-    order_id, order_status, customer_id = order_data.get("id"), order_data.get("status"), order_data.get("customer_id")
+    order_id = order_data.get("id")
+    order_status = order_data.get("status")
+    customer_id = order_data.get("customer_id")
+    
     if not all([order_id, order_status, customer_id]):
         return {"status": "ok", "message": "Missing required fields."}
     
@@ -200,78 +210,73 @@ async def order_updated_webhook(request: Request, db: Session = Depends(get_db))
         return {"status": "ok", "message": "User not found"}
 
     try:
+        # Эвристика для определения, является ли это событие "созданием" заказа,
+        # чтобы избежать дублирующих уведомлений.
+        is_just_created_webhook = not order_data.get("date_paid_gmt") and order_status in ['pending', 'on-hold']
 
-        if order_status in IGNORED_ORDER_STATUSES_FOR_USER_NOTIFICATION:
-            logger.info(f"Order {order_id} status changed to '{order_status}', which is in the ignored list. Skipping user notification.")
-        
-        else:
-            is_just_created_webhook = not order_data.get("date_paid_gmt") and order_status in ['pending', 'on-hold']
+        # --- Логика отправки уведомлений о статусе ---
+        # Отправляем уведомление, только если это НЕ первичное событие создания заказа
+        # И если статус не является техническим ('checkout-draft')
+        if not is_just_created_webhook and order_status != 'checkout-draft':
+            status_title = ORDER_STATUS_MAP.get(order_status, order_status.capitalize())
+            # Уведомление в бот
+            await bot_notification_service.send_order_status_update(db, user, order_id, status_title)
+            # Уведомление в Mini App
+            crud_notification.create_notification(
+                db=db,
+                user_id=user.id,
+                type="order_status_update",
+                title=f"Статус заказа №{order_id} обновлен",
+                message=f"Новый статус вашего заказа: {status_title}.",
+                related_entity_id=str(order_id)
+            )
 
-            if not is_just_created_webhook:
-                status_title = ORDER_STATUS_MAP.get(order_status, order_status.capitalize())
-                await bot_notification_service.send_order_status_update(db, user, order_id, status_title)
-                crud_notification.create_notification(
-                        db=db,
-                        user_id=user.id,
-                        type="order_status_update",
-                        title=f"Статус заказа №{order_id} обновлен",
-                        message=f"Новый статус вашего заказа: {status_title}.",
-                        related_entity_id=str(order_id)
-                    )
+        # --- Логика для статуса 'COMPLETED' ---
         if order_status == "completed":
-            
-            # --- НОВАЯ ПРОВЕРКА ---
-            # `coupon_lines` - это массив с примененными купонами.
-            # Если он не пустой, значит, в заказе была скидка.
             coupon_lines = order_data.get("coupon_lines", [])
+            should_accrue_cashback = True
             
-            if coupon_lines:
-                logger.info(f"Order {order_id} was completed with coupons. Skipping cashback accrual.")
-            else:
-                # Кешбэк начисляется, ТОЛЬКО если не было купонов
-                logger.info(f"Order {order_id} was completed without coupons. Accruing cashback.")
+            # Проверяем, был ли применен промокод (не за баллы)
+            for coupon in coupon_lines:
+                if not coupon.get("code", "").lower().startswith("points_"):
+                    should_accrue_cashback = False
+                    logger.info(f"Order {order_id} was completed with a promo coupon ('{coupon.get('code')}'). Skipping cashback accrual.")
+                    break
+            
+            # Если проверка пройдена, начисляем кешбэк
+            if should_accrue_cashback:
                 order_total = float(order_data.get("total", "0"))
-                points_added = loyalty_service.add_cashback_for_order(db, user, order_total, order_id)
-                
-                if points_added and points_added > 0:
-                    # Уведомления о начислении кешбэка
-                    await bot_notification_service.send_points_earned(db, user, points_added, order_id)
-                    crud_notification.create_notification(
-                        db, user_id=user.id, type="points_earned",
-                        title="Кешбэк начислен!", message=f"Вы получили {points_added} бонусных баллов за заказ №{order_id}.",
-                        related_entity_id=str(order_id)
-                    )
-            # --- КОНЕЦ НОВОЙ ПРОВЕРКИ ---
+                if order_total > 0:
+                    logger.info(f"Order {order_id} is eligible for cashback. Accruing points on total: {order_total}")
+                    points_added = loyalty_service.add_cashback_for_order(db, user, order_total, order_id)
+                    
+                    if points_added and points_added > 0:
+                        # Уведомления о начислении кешбэка
+                        await bot_notification_service.send_points_earned(db, user, points_added, order_id)
+                        crud_notification.create_notification(
+                            db, user_id=user.id, type="points_earned",
+                            title="Кешбэк начислен!", message=f"Вы получили {points_added} бонусных баллов за заказ №{order_id}.",
+                            related_entity_id=str(order_id)
+                        )
+                else:
+                    logger.info(f"Order {order_id} total is 0. No cashback to accrue.")
 
-            # Логика начисления реферального бонуса остается без изменений,
-            # так как она не зависит от кешбэка.
+            # Логика начисления реферального бонуса (выполняется независимо от кешбэка)
             await check_and_reward_referrer(db, user)
+
+        # --- Логика для статуса 'CANCELLED' ---
         elif order_status == "cancelled":
             logger.info(f"Order {order_id} was cancelled. Checking for spent points to refund.")
             
-            # 1. Ищем транзакцию списания для этого заказа
-            spend_transaction = crud_loyalty.get_spend_transaction_by_order_id(
-                db, user_id=user.id, order_id_wc=order_id
-            )
-            
+            spend_transaction = crud_loyalty.get_spend_transaction_by_order_id(db, user_id=user.id, order_id_wc=order_id)
             if spend_transaction:
-                # 2. Если списание было, создаем "возвратную" транзакцию
-                points_to_refund = -spend_transaction.points # `points` отрицательное, поэтому `-` делает его положительным
+                points_to_refund = -spend_transaction.points
                 
-                # Проверяем, не был ли уже сделан возврат для этого заказа
                 has_refund = db.query(LoyaltyTransaction).filter_by(user_id=user.id, order_id_wc=order_id, type="points_refund").first()
-                
                 if not has_refund:
-                    crud_loyalty.create_transaction(
-                        db,
-                        user_id=user.id,
-                        points=points_to_refund,
-                        type="points_refund",
-                        order_id_wc=order_id
-                    )
+                    crud_loyalty.create_transaction(db, user_id=user.id, points=points_to_refund, type="points_refund", order_id_wc=order_id)
                     
-                    # 3. Отправляем уведомления (в бот и Mini App)
-                    # await bot_notification_service.send_points_refund_notification(db, user, points_to_refund, order_id)
+                    await bot_notification_service.send_points_refund_notification(db, user, points_to_refund, order_id)
                     crud_notification.create_notification(
                         db, user_id=user.id, type="points_refund",
                         title="Баллы возвращены",
@@ -280,9 +285,8 @@ async def order_updated_webhook(request: Request, db: Session = Depends(get_db))
                     logger.info(f"Refunded {points_to_refund} points to user {user.id} for cancelled order {order_id}.")
                 else:
                     logger.warning(f"Refund for order {order_id} already exists. Skipping.")
-        
-        return {"status": "ok", "message": f"Successfully processed webhook for order {order_id}"}
 
+        return {"status": "ok", "message": f"Successfully processed webhook for order {order_id}"}
 
     except Exception as e:
         logger.error(f"Error during webhook business logic for order {order_id}", exc_info=True)

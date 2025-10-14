@@ -28,7 +28,7 @@ from app.bot.core import bot, dp
 from app.bot.handlers.user import user_router
 from app.bot.handlers.admin_dialogs import admin_dialog_router
 from app.bot.handlers.admin_actions import admin_actions_router
-
+from app.services.user_updater import update_all_usernames_task
 # Фоновые задачи и сервисы
 from app.services.user_levels import update_all_user_levels
 from app.services.points_expiration import expire_points_task, notify_about_expiring_points_task
@@ -99,7 +99,8 @@ async def lifespan(app: FastAPI):
             scheduler.add_job(notify_about_expiring_points_task, 'cron', hour=10, minute=0, timezone='Europe/Moscow')
             scheduler.add_job(check_inactive_bots_task, 'cron', hour=5, minute=0, timezone='Europe/Moscow')
             scheduler.add_job(cleanup_old_notifications_task, 'cron', hour=5, minute=30, timezone='Europe/Moscow')
-            scheduler.add_job(check_birthdays_task, 'cron', hour=9, minute=0, timezone='Europe/Moscow')
+            scheduler.add_job(check_birthdays_task, 'cron', hour=2, minute=0, timezone='Europe/Moscow')
+            scheduler.add_job(update_all_usernames_task, 'cron', day_of_week='sun', hour=6, timezone='Europe/Moscow') # Каждое воскресенье в 6 утра
             scheduler.start()
             logger.info("Scheduler started with background jobs.")
     else:
