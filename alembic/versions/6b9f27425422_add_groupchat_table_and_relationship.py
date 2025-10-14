@@ -1,8 +1,8 @@
-"""Initial migration for MariaDB
+"""Add groupchat table and relationship
 
-Revision ID: 95669a224c34
-Revises: 4e07f4d1162d
-Create Date: 2025-10-13 21:22:31.264438
+Revision ID: 6b9f27425422
+Revises: 
+Create Date: 2025-10-14 10:09:51.110096
 
 """
 from typing import Sequence, Union
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '95669a224c34'
-down_revision: Union[str, Sequence[str], None] = '4e07f4d1162d'
+revision: str = '6b9f27425422'
+down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -24,14 +24,14 @@ def upgrade() -> None:
     op.create_table('broadcasts',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('message_text', sa.Text(), nullable=False),
-    sa.Column('target_level', sa.String(length=255), nullable=True),
-    sa.Column('status', sa.String(length=255), nullable=False),
+    sa.Column('target_level', sa.String(), nullable=True),
+    sa.Column('status', sa.String(), nullable=False),
     sa.Column('sent_count', sa.Integer(), nullable=True),
     sa.Column('failed_count', sa.Integer(), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
     sa.Column('started_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('finished_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('photo_file_id', sa.String(length=255), nullable=True),
+    sa.Column('photo_file_id', sa.String(), nullable=True),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_broadcasts_id'), 'broadcasts', ['id'], unique=False)
