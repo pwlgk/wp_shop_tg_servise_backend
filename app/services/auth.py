@@ -7,7 +7,7 @@ import httpx
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
-
+from app.services import user as user_service
 from app.clients.woocommerce import wc_client
 from app.core.config import settings
 from app.core.redis import redis_client
@@ -163,6 +163,7 @@ async def authenticate_telegram_user(init_data: str, db: Session = Depends(get_d
     
     # Вызываем нашу основную функцию для регистрации/получения пользователя
     db_user = await register_or_get_user(user_info=user_info, referral_code=referral_code)
+    user_service.update_user_profile_from_telegram(db, db_user, user_info)
     # Генерируем JWT токен
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(

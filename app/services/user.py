@@ -212,3 +212,32 @@ async def get_user_dashboard(db: Session, current_user: User) -> UserDashboard:
         has_unread_notifications=has_unread_notifications,
         profile_completion_status=profile_completion_status
     )
+
+
+def update_user_profile_from_telegram(db: Session, user: User, telegram_user_data: dict):
+    """
+    Обновляет данные в нашей локальной БД на основе свежих данных от Telegram.
+    """
+    updated = False
+    
+    # Обновляем username, если он изменился
+    new_username = telegram_user_data.get("username")
+    if user.username != new_username:
+        user.username = new_username
+        updated = True
+        
+    # Обновляем ФИО, если они изменились
+    new_first_name = telegram_user_data.get("first_name")
+    if user.first_name != new_first_name:
+        user.first_name = new_first_name
+        updated = True
+        
+    new_last_name = telegram_user_data.get("last_name")
+    if user.last_name != new_last_name:
+        user.last_name = new_last_name
+        updated = True
+        
+    if updated:
+        db.commit()
+        db.refresh(user)
+        logger.info(f"Updated local profile for user {user.id} from Telegram data.")

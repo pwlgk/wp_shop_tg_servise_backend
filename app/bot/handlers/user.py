@@ -13,6 +13,7 @@ from app.services import auth as auth_service
 from app.bot.core import bot
 from app.bot.filters.admin import IsAdminFilter
 import logging
+from app.services import user as user_service
 
 logger = logging.getLogger(__name__)
 # Создаем роутер для этого модуля.
@@ -75,7 +76,7 @@ async def command_start_handler(message: Message, command: CommandObject) -> Non
             user_info=message.from_user.model_dump(),
             referral_code=referral_code
         )
-        
+        user_service.update_user_profile_from_telegram(db, db_user, message.from_user.model_dump())
         if not db_user.bot_accessible:
             logger.info(f"User {db_user.id} re-activated the bot. Setting bot_accessible to True.")
             db_user.bot_accessible = True
