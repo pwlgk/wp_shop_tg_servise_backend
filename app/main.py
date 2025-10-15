@@ -32,6 +32,7 @@ from app.services.user_updater import update_all_usernames_task
 # Фоновые задачи и сервисы
 from app.services.user_levels import update_all_user_levels
 from app.services.points_expiration import expire_points_task, notify_about_expiring_points_task
+from app.services.customer_engagement import activate_new_users_task, reactivate_sleeping_users_task
 from app.services.bot_status_updater import check_inactive_bots_task
 from app.services.notification_cleanup import cleanup_old_notifications_task
 from app.bot.services import notification as bot_notification_service
@@ -97,10 +98,12 @@ async def lifespan(app: FastAPI):
             scheduler.add_job(update_all_user_levels, 'cron', hour=3, minute=0, timezone='Europe/Moscow')
             scheduler.add_job(expire_points_task, 'cron', hour=4, minute=0, timezone='Europe/Moscow')
             scheduler.add_job(notify_about_expiring_points_task, 'cron', hour=10, minute=0, timezone='Europe/Moscow')
-            scheduler.add_job(check_inactive_bots_task, 'cron', hour=5, minute=0, timezone='Europe/Moscow')
+            scheduler.add_job(check_inactive_bots_task, 'cron', hour=2, minute=0, timezone='Europe/Moscow')
             scheduler.add_job(cleanup_old_notifications_task, 'cron', hour=5, minute=30, timezone='Europe/Moscow')
-            scheduler.add_job(check_birthdays_task, 'cron', hour=2, minute=0, timezone='Europe/Moscow')
+            scheduler.add_job(check_birthdays_task, 'cron', hour=5, minute=0, timezone='Europe/Moscow')
             scheduler.add_job(update_all_usernames_task, 'cron', day_of_week='sun', hour=6, timezone='Europe/Moscow') # Каждое воскресенье в 6 утра
+            scheduler.add_job(activate_new_users_task, 'cron', hour=11, minute=0, timezone='Europe/Moscow')
+            scheduler.add_job(reactivate_sleeping_users_task, 'cron', hour=12, minute=0, timezone='Europe/Moscow')
             scheduler.start()
             logger.info("Scheduler started with background jobs.")
     else:

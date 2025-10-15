@@ -523,3 +523,25 @@ async def send_points_refund_notification(db: Session, user: User, points_refund
         f"<b>{points_refunded} списанных баллов</b>."
     )
     await _send_message(db, user, message)
+
+async def send_activation_notification(db: Session, user: User, promo_code: str):
+    """Сообщение для нового пользователя без покупок."""
+    message = (
+        f"👋 Привет, {user.first_name or 'мы заметили'}, что вы еще не сделали свою первую покупку!\n\n"
+        f"Чтобы сделать шоппинг еще приятнее, дарим вам персональный промокод на скидку: <code>{promo_code}</code> 🎁\n\n"
+        f"Он с нетерпением ждет вас в корзине!"
+    )
+    # Можно добавить кнопку, ведущую в каталог
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🛍️ Перейти в каталог", web_app=WebAppInfo(url=settings.MINI_APP_URL))
+    
+async def send_reactivation_notification(db: Session, user: User, promo_code: str):
+    """Сообщение для "спящего" пользователя."""
+    message = (
+        f"👋 Давно не виделись, {user.first_name or 'друг'}!\n\n"
+        f"Мы соскучились и хотим порадовать вас! Дарим вам персональный промокод на скидку: <code>{promo_code}</code> 🎁\n\n"
+        f"Заглядывайте в наш каталог, у нас много новинок!"
+    )
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🛍️ Перейти в каталог", web_app=WebAppInfo(url=settings.MINI_APP_URL))
+    

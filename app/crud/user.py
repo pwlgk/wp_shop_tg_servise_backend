@@ -1,8 +1,8 @@
 # app/crud/user.py
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from sqlalchemy.orm import Session
 from app.models.user import User
-from sqlalchemy import func
+from sqlalchemy import Date, cast, func
 from sqlalchemy import or_
 from sqlalchemy import extract
 
@@ -144,11 +144,21 @@ def count_new_users_today(db: Session) -> int:
     return db.query(User).filter(User.created_at >= today_start).count()
 
 def get_users_with_birthday_today(db: Session) -> list[User]:
-    """Находит всех пользователей, у которых сегодня день рождения."""
+    """
+    Находит всех пользователей, у которых сегодня день рождения и которые
+    зарегистрированы в системе более 7 дней.
+    """
     today = datetime.utcnow()
+    # Отсекаем пользователей, зарегистрированных в последнюю неделю
+    registration_threshold = today - timedelta(days=7)
+    
     return db.query(User).filter(
+        # Условие на день и месяц рождения
         extract('month', User.birth_date) == today.month,
-        extract('day', User.birth_date) == today.day
+        extract('day', User.birth_date) == today.day,
+        # --- НОВОЕ УСЛОВИЕ ---
+        # Условие на дату регистрации
+        User.created_at < registration_threshold
     ).all()
 
 def get_user_by_wordpress_id(db: Session, wordpress_id: int) -> User | None:
@@ -161,3 +171,7 @@ def update_user_phone(db: Session, user: User, phone: str) -> User:
     db.commit()
     db.refresh(user)
     return user
+
+def get_users_registered_on_date(db: Session, target_date: date) -> list[User]:
+    """Находит всех пользователей, зарегистрированных в определенный день."""
+    return db.query(User).filter(cast(User.created_at, Date) == target_date).all()

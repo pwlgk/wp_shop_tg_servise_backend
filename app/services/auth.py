@@ -10,8 +10,9 @@ import httpx
 from fastapi import Depends, HTTPException, status
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
-
 from app.bot.services import notification as bot_notification_service
+
+# Импорты сгруппированы для читаемости
 from app.clients.woocommerce import wc_client
 from app.core.config import settings
 from app.core.redis import redis_client
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_db():
+    """Зависимость FastAPI для получения сессии БД."""
     db = SessionLocal()
     try:
         yield db
@@ -43,13 +45,9 @@ def get_db():
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     """Создает JWT токен."""
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
 async def register_or_get_user(
@@ -91,7 +89,8 @@ async def register_or_get_user(
                 if existing_wc_users:
                     wordpress_id = existing_wc_users[0]["id"]
                 else:
-                    raise HTTPException(status_code=500, detail="User sync failed.")
+                    # Этого никогда не должно произойти, но лучше обработать
+                    raise HTTPException(status_code=500, detail="User sync failed: WC user exists but could not be retrieved.")
             else:
                 logger.error(f"Failed to create user in WooCommerce: {e.response.text}", exc_info=True)
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Could not create user in WordPress.")
@@ -112,33 +111,36 @@ async def register_or_get_user(
                 crud_referral.create_referral(db, referrer_id=referrer.id, referred_id=db_user.id)
                 logger.info(f"Referral link created: referrer_id={referrer.id} -> referred_id={db_user.id}")
 
-    # --- БЛОК НАЧИСЛЕНИЯ БОНУСОВ ---
-    try:
-        shop_settings = await settings_service.get_shop_settings(redis_client)
-        
-        # 1. Бонус за регистрацию по реферальной ссылке
-        referral_link = crud_referral.get_referral_by_referred_id(db, referred_id=db_user.id)
-        has_referral_bonus = db.query(LoyaltyTransaction).filter_by(user_id=db_user.id, type="promo_referral_welcome").first()
-
-        if referral_link and not has_referral_bonus:
-            bonus_amount = shop_settings.referral_welcome_bonus
-            if bonus_amount > 0:
+    if is_new_user:
+        try:
+            shop_settings = await settings_service.get_shop_settings(redis_client)
+            referral_link = crud_referral.get_referral_by_referred_id(db, referred_id=db_user.id)
+            
+            bonus_amount = 0
+            bonus_type = None
+            bonus_title = ""
+            bonus_message = ""
+            
+            if referral_link and shop_settings.referral_welcome_bonus > 0:
+                bonus_amount = shop_settings.referral_welcome_bonus
+                bonus_type = "promo_referral_welcome"
+                bonus_title = "Приветственный бонус!"
+                bonus_message = f"Вы получили {bonus_amount} баллов за регистрацию по приглашению. Добро пожаловать!"
                 logger.info(f"Granting REFERRAL welcome bonus ({bonus_amount}) to user {db_user.id}")
-                crud_loyalty.create_transaction(db, user_id=db_user.id, points=bonus_amount, type="promo_referral_welcome")
-                crud_notification.create_notification(db, user_id=db_user.id, type="points_earned", title="Приветственный бонус!", message=f"Вы получили {bonus_amount} баллов за регистрацию по приглашению. Добро пожаловать!")
-                await bot_notification_service.send_welcome_bonus(db, db_user, bonus_amount)
-        
-        # 2. Общий приветственный бонус (только для абсолютно новых пользователей)
-        if is_new_user and shop_settings.is_welcome_bonus_active:
-            bonus_amount = shop_settings.welcome_bonus_amount
-            if bonus_amount > 0:
+            
+            elif shop_settings.is_welcome_bonus_active and shop_settings.welcome_bonus_amount > 0:
+                bonus_amount = shop_settings.welcome_bonus_amount
+                bonus_type = "promo_welcome"
+                bonus_title = "Добро пожаловать!"
+                bonus_message = f"Вам начислен приветственный бонус: {bonus_amount} баллов!"
                 logger.info(f"Granting GENERAL welcome bonus ({bonus_amount}) to user {db_user.id}")
-                crud_loyalty.create_transaction(db, user_id=db_user.id, points=bonus_amount, type="promo_welcome")
-                crud_notification.create_notification(db, user_id=db_user.id, type="points_earned", title="Добро пожаловать!", message=f"Вам начислен приветственный бонус: {bonus_amount} баллов!")
+            
+            if bonus_amount > 0 and bonus_type:
+                crud_loyalty.create_transaction(db, user_id=db_user.id, points=bonus_amount, type=bonus_type)
+                crud_notification.create_notification(db, user_id=db_user.id, type="points_earned", title=bonus_title, message=bonus_message)
                 await bot_notification_service.send_welcome_bonus(db, db_user, bonus_amount)
-
-    except Exception as e:
-        logger.error(f"Failed during bonus granting for user {db_user.id}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Failed during bonus granting for new user {db_user.id}", exc_info=True)
 
     return db_user
 
@@ -160,10 +162,9 @@ async def authenticate_telegram_user(init_data: str, db: Session = Depends(get_d
     if start_param and start_param.startswith("ref_"):
         referral_code = start_param.split("ref_")[1]
     
-    # Вызываем нашу основную функцию, передавая ей сессию `db`
+    # --- ИСПРАВЛЕНИЕ: Передаем сессию `db` ---
     db_user = await register_or_get_user(db, user_info=user_info, referral_code=referral_code)
     
-    # Обновляем ФИО/username из свежих данных Telegram, используя ту же сессию `db`
     user_service.update_user_profile_from_telegram(db, db_user, user_info)
     
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
