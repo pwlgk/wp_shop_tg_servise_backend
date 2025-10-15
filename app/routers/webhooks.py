@@ -112,17 +112,30 @@ async def product_updated_webhook(
         if not product_id:
             return {"status": "ok", "message": "Product ID not found in payload"}
 
-        cache_key_user_prefix = f"product:{product_id}:user:*"
-        cache_key_anon = f"product:{product_id}"
+        keys_to_delete = []
+    
+        # 1. Используем SCAN для поиска ключей по шаблону без блокировки Redis
+        async for key in redis.scan_iter(match=f"product:{product_id}:*"):
+            keys_to_delete.append(key)
+        async for key in redis.scan_iter(match="products_v*"):
+            keys_to_delete.append(key)
+            
+        # Добавляем анонимный кеш для детальной страницы
+        keys_to_delete.append(f"product:{product_id}")
         
-        # Удаляем кеш для всех пользователей и для анонимного
-        user_keys = await redis.keys(cache_key_user_prefix)
-        if user_keys:
-            await redis.delete(*user_keys)
-        await redis.delete(cache_key_anon)
+        # 2. Удаляем все найденные ключи за один раз, если они есть
+        if keys_to_delete:
+            # Убираем дубликаты, если они случайно попали
+            unique_keys = list(set(keys_to_delete))
+            
+            await redis.delete(*unique_keys)
+            logger.info(
+                f"Cache invalidated for product ID {product_id}. "
+                f"Deleted {len(unique_keys)} keys (details + lists)."
+            )
+            return {"status": "ok", "message": f"Cache invalidated for product {product_id} and all lists"}
         
-        logger.info(f"Cache invalidated for product ID: {product_id}")
-        return {"status": "ok", "message": f"Cache invalidated for product {product_id}"}
+        return {"status": "ok", "message": "No relevant cache keys found to invalidate."}
         
     except json.JSONDecodeError:
         return {"status": "ok", "message": "Non-JSON payload received"}
