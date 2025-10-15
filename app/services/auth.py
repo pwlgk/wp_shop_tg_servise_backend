@@ -73,12 +73,17 @@ async def register_or_get_user(
         last_name = user_info.get("last_name", "")
             
         try:
+            # --- ИЗМЕНЕНИЕ ЗДЕСЬ: ГЕНЕРИРУЕМ И ДОБАВЛЯЕМ ПАРОЛЬ ---
+            password = secrets.token_urlsafe(16) # Генерируем 16-символьный пароль
             new_wc_user_data = {
                 "email": f"{telegram_id}@telegram.user",
                 "username": str(telegram_id),
                 "first_name": first_name,
                 "last_name": last_name,
+                "password": password # <-- Добавляем пароль в payload
             }
+            # ----------------------------------------------------
+            
             created_wc_user = await wc_client.post("wc/v3/customers", json=new_wc_user_data)
             wordpress_id = created_wc_user["id"]
         except httpx.HTTPStatusError as e:
