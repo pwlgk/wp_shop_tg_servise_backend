@@ -16,11 +16,7 @@ from app.core.logging_config import setup_logging
 from app.core.redis import redis_client
 
 # Роутеры FastAPI
-from app.routers import (
-    auth, user, catalog, cart, order, admin as admin_router,
-    settings as settings_router, coupon as coupon_router,
-    notification as notification_router, cms
-)
+from app.routers.v1.api import api_router as api_v1_router
 from app.routers.webhooks import wc_router, telegram_router
 
 # Логика бота
@@ -101,7 +97,7 @@ async def lifespan(app: FastAPI):
             scheduler.add_job(check_inactive_bots_task, 'cron', hour=2, minute=0, timezone='Europe/Moscow')
             scheduler.add_job(cleanup_old_notifications_task, 'cron', hour=5, minute=30, timezone='Europe/Moscow')
             scheduler.add_job(check_birthdays_task, 'cron', hour=5, minute=0, timezone='Europe/Moscow')
-            scheduler.add_job(update_all_usernames_task, 'cron', day_of_week='sun', hour=6, timezone='Europe/Moscow') # Каждое воскресенье в 6 утра
+            scheduler.add_job(update_all_usernames_task, 'cron', day_of_week='sun', hour=6, timezone='Europe/Moscow')
             scheduler.add_job(activate_new_users_task, 'cron', hour=11, minute=0, timezone='Europe/Moscow')
             scheduler.add_job(reactivate_sleeping_users_task, 'cron', hour=12, minute=0, timezone='Europe/Moscow')
             scheduler.start()
@@ -155,21 +151,10 @@ app.add_middleware(
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 # --- Подключение роутеров FastAPI ---
-api_router = APIRouter(prefix="/api/v1")
+api_router = APIRouter(prefix="/api")
 
 # Пользовательские и публичные эндпоинты
-api_router.include_router(auth.router, tags=["Authentication"])
-api_router.include_router(user.router, tags=["Users"])
-api_router.include_router(catalog.router, tags=["Catalog"])
-api_router.include_router(cart.router, tags=["Cart & Favorites"])
-api_router.include_router(order.router, tags=["Orders"])
-api_router.include_router(settings_router.router, tags=["Settings"])
-api_router.include_router(coupon_router.router, tags=["Coupons"])
-api_router.include_router(notification_router.router, tags=["Notifications"])
-api_router.include_router(cms.router, tags=["CMS"])
-
-# Админские эндпоинты
-api_router.include_router(admin_router.router, prefix="/admin", tags=["Admin"])
+api_router.include_router(api_v1_router)
 
 # Подключаем главный роутер к приложению
 app.include_router(api_router)
