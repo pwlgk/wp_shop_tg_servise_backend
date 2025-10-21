@@ -40,7 +40,7 @@ async def get_orders_list(
     return await admin_service.get_paginated_orders(db, page, size, **active_filters)
 
 
-@router.get("/{order_id}", response_model=AdminOrderDetails)
+@router.get("/{order_id}", response_model=AdminOrderDetails) # <--- Убедитесь, что здесь правильная response_model
 async def get_order_details_endpoint(
     order_id: int,
     db: Session = Depends(get_db)

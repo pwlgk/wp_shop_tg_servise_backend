@@ -239,7 +239,16 @@ class TaskRunRequest(BaseModel):
         "cleanup_old_notifications"
     ]
 
+class AdminOrderNote(BaseModel):
+    """Схема для одной заметки к заказу."""
+    id: int
+    author: str
+    date_created: datetime
+    note: str
+    customer_note: bool # True, если заметка видна покупателю
 
+    class Config:
+        from_attributes = True
 
 class AdminOrderCustomerInfo(BaseModel):
     """Информация о клиенте для карточки заказа."""
@@ -253,11 +262,10 @@ class AdminOrderCustomerInfo(BaseModel):
 class AdminOrderDetails(Order):
     """
     Расширенная схема заказа для админ-панели.
-    Наследует все поля от обычной схемы Order.
+    Включает информацию о клиенте и заметки к заказу.
     """
     customer_info: AdminOrderCustomerInfo
-    # В будущем сюда можно добавить список заметок к заказу (order notes)
-    # notes: List[SomeNoteSchema] = []
+    notes: List[AdminOrderNote] = []
 
 class AdminOrderStatusUpdate(BaseModel):
     status: Literal["processing", "on-hold", "completed", "cancelled", "refunded", "failed"]
