@@ -156,7 +156,7 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 api_router = APIRouter(prefix="/api")
 
 # Пользовательские и публичные эндпоинты
-# api_router.include_router(api_v1_router)
+api_router.include_router(api_v1_router)
 api_router.include_router(api_v2_router)
 
 # Подключаем главный роутер к приложению
