@@ -94,7 +94,7 @@ def _format_order_details_for_user(order: Order) -> str: # <-- Переимен�
     recipient_lines = []
     if recipient_name: recipient_lines.append(f"<b>Получатель:</b> {recipient_name}")
     if billing.phone: recipient_lines.append(f"<b>Номер телефона:</b> {billing.phone}")
-    if billing.email: recipient_lines.append(f"<b>Email:</b> {billing.email}")
+    # if billing.email: recipient_lines.append(f"<b>Email:</b> {billing.email}")
     
     items_lines = ["<b>Состав заказа:</b>"]
     for item in order.line_items:

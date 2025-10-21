@@ -16,7 +16,7 @@ class LoyaltyTransaction(Base):
     
     # 'order_earn', 'order_spend', 'promo', 'expired'
     type = Column(String, nullable=False)
-    
+    related_transaction_id = Column(Integer, ForeignKey('loyalty_transactions.id'), nullable=True)
     # ID заказа в WooCommerce, к которому привязана транзакция
     order_id_wc = Column(Integer, nullable=True, index=True)
     user = relationship("User")

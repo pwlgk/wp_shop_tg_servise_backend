@@ -55,7 +55,15 @@ class Settings(BaseSettings):
     TELEGRAM_WEBHOOK_SECRET: str
     MINI_APP_URL: str
     MINI_APP_URL_ADMIN: str
-    
+    S3_BUCKET_NAME: str
+    S3_ACCESS_KEY: str
+    S3_SECRET_KEY: str
+    S3_ENDPOINT_URL: str
+    TELEGRAM_CHANNEL_ID: str
+    TELEGRAM_MINI_APP_NAME: str
+    TELEGRAM_MINI_APP_ADMIN_NAME: str
+    SUPPORT_CHAT_ID: int
+
     @property
     def TELEGRAM_WEBHOOK_PATH(self) -> str:
         # Путь, который мы будем слушать. /bot/ префикс для безопасности

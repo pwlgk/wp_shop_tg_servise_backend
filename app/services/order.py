@@ -36,7 +36,7 @@ async def create_order_from_cart(
 ) -> Order:
     """
     Создает заказ в WooCommerce на основе корзины пользователя.
-    Выполняет все проверки: наличие, баланс баллов, % списания, мин. сумма.
+    Выполняет все проверки: наличие (включая вариации), баланс баллов, % списания, мин. сумма.
     """
     # 1. Получаем настройки магазина и содержимое корзины
     shop_settings = await settings_service.get_shop_settings(redis)
@@ -51,6 +51,7 @@ async def create_order_from_cart(
     total_items_price = 0.0
 
     for item in cart_items_db:
+        # Инвалидируем кеш
         await redis.delete(f"product:{item.product_id}:user:{current_user.id}")
         await redis.delete(f"product:{item.product_id}")
 
@@ -61,33 +62,72 @@ async def create_order_from_cart(
             user_id=current_user.id
         )
 
-        if not product_details or product_details.stock_status != 'instock':
-            unavailable_items.append(product_details.name if product_details else f"ID {item.product_id}")
+        if not product_details:
+            unavailable_items.append(f"ID {item.product_id} (товар удален)")
             continue
 
-        if product_details.stock_quantity is not None and item.quantity > product_details.stock_quantity:
-            unavailable_items.append(f"{product_details.name} (в наличии: {product_details.stock_quantity})")
+        item_price_str: str
+        item_stock_quantity: int | None
+        item_stock_status: str
+
+        if item.variation_id:
+            # Сценарий 1: Вариативный товар
+            if not product_details.variations:
+                unavailable_items.append(f"'{product_details.name}' (опции изменились)")
+                continue
+
+            selected_variation = next((v for v in product_details.variations if v.id == item.variation_id), None)
+            if not selected_variation or selected_variation.stock_status != 'instock':
+                unavailable_items.append(f"'{product_details.name}' (выбранная опция закончилась)")
+                continue
+            
+            item_price_str = selected_variation.price
+            item_stock_quantity = selected_variation.stock_quantity
+            line_items_for_wc.append({"variation_id": item.variation_id, "quantity": item.quantity})
+        else:
+            # Сценарий 2: Простой товар
+            if product_details.variations:
+                unavailable_items.append(f"'{product_details.name}' (не выбрана опция)")
+                continue
+            if product_details.stock_status != 'instock':
+                unavailable_items.append(f"'{product_details.name}'")
+                continue
+
+            item_price_str = product_details.price
+            item_stock_quantity = product_details.stock_quantity
+            line_items_for_wc.append({"product_id": item.product_id, "quantity": item.quantity})
+
+        if item_stock_quantity is not None and item.quantity > item_stock_quantity:
+            unavailable_items.append(f"'{product_details.name}' (в наличии: {item_stock_quantity} шт.)")
             continue
         
-        line_items_for_wc.append({"product_id": item.product_id, "quantity": item.quantity})
-        total_items_price += float(product_details.price) * item.quantity
+        # --- НАЧАЛО ИСПРАВЛЕНИЯ ЗДЕСЬ ---
+        # Добавляем такую же безопасную проверку цены, как в get_user_cart
+        try:
+            current_item_price = float(item_price_str)
+        except (ValueError, TypeError):
+            logger.warning(
+                f"[Create Order] Could not convert price '{item_price_str}' for product ID {item.product_id} "
+                f"(variation ID: {item.variation_id}). Treating as 0."
+            )
+            current_item_price = 0.0
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+        
+        total_items_price += current_item_price * item.quantity
 
     if unavailable_items:
         error_detail = "Некоторые товары закончились или их количество изменилось: " + ", ".join(unavailable_items)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error_detail)
 
-    # 3. ПРОВЕРКА УСЛОВИЙ ОПЛАТЫ И ЗАКАЗА (ДО ТРАНЗАКЦИИ)
-
-    # 3.1 Проверка минимальной суммы заказа
+    # 3. ПРОВЕРКА УСЛОВИЙ ОПЛАТЫ И ЗАКАЗА (этот блок остается без изменений)
     if total_items_price < shop_settings.min_order_amount:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Минимальная сумма заказа - {shop_settings.min_order_amount} руб."
         )
 
-    # 3.2 Проверка условий списания бонусов
     if order_data.points_to_spend > 0:
-        # Проверяем максимальный процент списания
+        # ... (проверка максимального процента и баланса баллов)
         max_points_to_spend = total_items_price * (shop_settings.max_points_payment_percentage / 100)
         if order_data.points_to_spend > max_points_to_spend:
             raise HTTPException(
@@ -95,13 +135,11 @@ async def create_order_from_cart(
                 detail=f"Бонусами можно оплатить не более {int(max_points_to_spend)} ({shop_settings.max_points_payment_percentage}%) от стоимости товаров."
             )
         
-        # Проверяем, что на балансе достаточно баллов (эта проверка менее критична здесь,
-        # так как `spend_points` сделает это атомарно, но она обеспечивает быстрый отказ)
         current_balance = loyalty_service.get_user_balance(db, current_user)
         if order_data.points_to_spend > current_balance:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недостаточно бонусных баллов для списания.")
 
-    # 4. ОСНОВНАЯ ТРАНЗАКЦИЯ
+    # 4. ОСНОВНАЯ ТРАНЗАКЦИЯ (этот блок остается без изменений)
     db.begin_nested()
     try:
         # Шаг 4.1: Атомарно списываем баллы
@@ -109,7 +147,7 @@ async def create_order_from_cart(
             loyalty_service.spend_points(
                 db, user=current_user,
                 points_to_spend=order_data.points_to_spend,
-                order_id_wc=0
+                order_id_wc=0 # Временный ID
             )
 
         # Шаг 4.2: Формируем и отправляем заказ в WordPress
@@ -118,7 +156,7 @@ async def create_order_from_cart(
         
         order_payload = {
             "customer_id": current_user.wordpress_id,
-            "line_items": line_items_for_wc,
+            "line_items": line_items_for_wc, # <-- Теперь здесь корректный список
             "billing": customer_data.get("billing"),
             "shipping": customer_data.get("shipping"),
             "payment_method_id": order_data.payment_method_id,
@@ -150,7 +188,7 @@ async def create_order_from_cart(
             raise e
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Не удалось создать заказ.")
 
-    # 5. Валидация ответа и отправка уведомлений
+    # 5. Валидация ответа и отправка уведомлений (этот блок остается без изменений)
     validated_order = Order.model_validate(created_order_data)
     
     await notification_service.send_new_order_confirmation(db, current_user, validated_order)

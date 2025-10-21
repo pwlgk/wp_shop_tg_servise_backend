@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 3600
 
-# --- НОВЫЙ ВСПОМОГАТЕЛЬНЫЙ КЛАСС ---
 class ImageSrcParser(HTMLParser):
     """Простой парсер для извлечения src первого тега img."""
     def __init__(self):
@@ -39,7 +38,6 @@ def extract_image_url_from_html(html_content: str) -> str | None:
     parser = ImageSrcParser()
     parser.feed(html_content)
     return parser.image_url
-# --- КОНЕЦ НОВОГО КОДА ---
 
 
 async def get_active_banners(redis: Redis) -> List[Banner]:
@@ -179,7 +177,6 @@ async def process_new_promo(promo_id: int):
     """
     logger.info(f"--- Starting Promo Processing for ID: {promo_id} ---")
     
-    # --- КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: ДОБАВЛЯЕМ ЗАДЕРЖКУ ---
     # Даем WordPress 5 секунд, чтобы все плагины (особенно ACF)
     # успели сохранить свои мета-данные после хука save_post.
     await asyncio.sleep(5)

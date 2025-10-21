@@ -1,34 +1,68 @@
 # app/crud/loyalty.py
+
 from typing import List
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-from app.models.loyalty import LoyaltyTransaction
-from datetime import datetime, timedelta
-from sqlalchemy import func, select
-from sqlalchemy import Date, cast
+from sqlalchemy import func, select, update, cast, Date
+from collections import deque
+from datetime import datetime, timedelta, timezone
 
-def create_transaction(db: Session, user_id: int, points: int, type: str, order_id_wc: int = None, expires_at: datetime = None) -> LoyaltyTransaction:
+from app.models.loyalty import LoyaltyTransaction
+from app.models.user import User
+
+
+def create_transaction(
+    db: Session, 
+    user_id: int, 
+    points: int, 
+    type: str, 
+    order_id_wc: int = None, 
+    expires_at: datetime = None,
+    related_transaction_id: int = None
+) -> LoyaltyTransaction:
+    """
+    Создает объект транзакции и добавляет его в сессию.
+    ТРЕБУЕТ ВНЕШНЕГО ВЫЗОВА db.commit().
+    """
     transaction = LoyaltyTransaction(
         user_id=user_id,
         points=points,
         type=type,
         order_id_wc=order_id_wc,
-        expires_at=expires_at
+        expires_at=expires_at,
+        related_transaction_id=related_transaction_id
     )
     db.add(transaction)
-    db.commit()
-    db.refresh(transaction)
+    # db.flush() можно использовать, чтобы получить ID до коммита, если нужно
+    # db.refresh(transaction)
     return transaction
 
+
+def get_all_user_transactions_chronological(db: Session, user_id: int) -> List[LoyaltyTransaction]:
+    """Получает ВСЕ транзакции пользователя в хронологическом порядке."""
+    return db.query(LoyaltyTransaction).filter(
+        LoyaltyTransaction.user_id == user_id
+    ).order_by(LoyaltyTransaction.created_at.asc()).all()
+
+
 def get_user_balance(db: Session, user_id: int) -> int:
-    """Подсчитывает текущий баланс пользователя, учитывая сгоревшие баллы."""
+    """
+    Подсчитывает итоговый баланс пользователя путем простого суммирования
+    всех его транзакций (положительных и отрицательных).
+    
+    Эта функция полагается на то, что фоновая задача `expire_points_task`
+    корректно создает "сжигающие" ('expired') отрицательные транзакции
+    для поддержания баланса в актуальном состоянии.
+    """
+    
+    # Выполняем один-единственный SQL-запрос: SUM(points)
     balance = db.query(func.sum(LoyaltyTransaction.points)).filter(
-        LoyaltyTransaction.user_id == user_id,
-        # Условие, что баллы еще не сгорели
-        (LoyaltyTransaction.expires_at == None) | (LoyaltyTransaction.expires_at > datetime.utcnow())
+        LoyaltyTransaction.user_id == user_id
     ).scalar()
     
+    # scalar() вернет None, если у пользователя нет транзакций.
+    # В этом случае баланс равен 0.
     return balance or 0
+
 
 def get_user_transactions(
     db: Session, 
@@ -41,9 +75,11 @@ def get_user_transactions(
         LoyaltyTransaction.user_id == user_id
     ).order_by(LoyaltyTransaction.created_at.desc()).offset(skip).limit(limit).all()
 
+
 def count_user_transactions(db: Session, user_id: int) -> int:
     """Подсчитывает общее количество транзакций у пользователя."""
     return db.query(LoyaltyTransaction).filter(LoyaltyTransaction.user_id == user_id).count()
+
 
 def get_total_referral_earnings(db: Session, user_id: int) -> int:
     """Подсчитывает общую сумму баллов, заработанных пользователем на реферальной программе."""
@@ -51,51 +87,41 @@ def get_total_referral_earnings(db: Session, user_id: int) -> int:
         LoyaltyTransaction.user_id == user_id,
         LoyaltyTransaction.type == "referral_earn"
     ).scalar()
-    
-    # scalar() может вернуть None, если транзакций нет, поэтому обрабатываем этот случай
     return total_earned or 0
+
 
 def get_expired_positive_transactions(db: Session) -> list[LoyaltyTransaction]:
     """
     Находит все "положительные" транзакции, срок действия которых истек,
     и для которых еще не была создана "сжигающая" транзакция.
     """
-    # Подзапрос, чтобы найти ID всех транзакций, которые уже были "списаны"
-    # как сгоревшие. Мы ищем по order_id_wc, если он есть, чтобы связать
-    # начисление и сгорание.
-    subquery = select(LoyaltyTransaction.order_id_wc).where(
+    subquery = select(LoyaltyTransaction.related_transaction_id).where(
         LoyaltyTransaction.type == 'expired',
-        LoyaltyTransaction.order_id_wc.isnot(None)
+        LoyaltyTransaction.related_transaction_id.isnot(None)
     )
 
     return db.query(LoyaltyTransaction).filter(
-        # Ищем только "зарабатывающие" транзакции
-        LoyaltyTransaction.type.in_(['order_earn', 'promo_welcome', 'referral_earn']),
-        # У которых есть дата сгорания
+        LoyaltyTransaction.type.in_(['order_earn', 'promo_welcome', 'referral_earn', 'promo_birthday']),
         LoyaltyTransaction.expires_at.isnot(None),
-        # И эта дата уже в прошлом
-        LoyaltyTransaction.expires_at < datetime.utcnow(),
-        # И для которых еще не было "сжигания"
-        LoyaltyTransaction.order_id_wc.not_in(subquery)
+        LoyaltyTransaction.expires_at < datetime.now(timezone.utc),
+        LoyaltyTransaction.id.not_in(subquery)
     ).all()
+
 
 def get_transactions_expiring_soon(db: Session, days_before_expiration: int) -> list:
     """
     Находит сгруппированные по пользователю суммы баллов, которые сгорят
     через указанное количество дней.
     """
-    target_date = datetime.utcnow().date() + timedelta(days=days_before_expiration)
+    target_date = (datetime.now(timezone.utc) + timedelta(days=days_before_expiration)).date()
     
-    # Мы группируем транзакции по user_id и дате сгорания, чтобы отправить
-    # одно сообщение, если у пользователя сгорают баллы из разных заказов в один день.
     query = db.query(
         LoyaltyTransaction.user_id,
         func.sum(LoyaltyTransaction.points).label('total_points_expiring')
     ).filter(
-        # Ищем только "положительные" транзакции, которые еще не сгорели
         LoyaltyTransaction.points > 0,
         LoyaltyTransaction.type != 'expired',
-        # Где дата сгорания равна целевой дате (сегодня + X дней)
+        LoyaltyTransaction.expires_at.isnot(None),
         cast(LoyaltyTransaction.expires_at, Date) == target_date
     ).group_by(
         LoyaltyTransaction.user_id
@@ -105,11 +131,14 @@ def get_transactions_expiring_soon(db: Session, days_before_expiration: int) -> 
 
 
 def get_spend_transaction_by_order_id(db: Session, user_id: int, order_id_wc: int) -> LoyaltyTransaction | None:
-    """
-    Находит транзакцию списания баллов ('order_spend') для конкретного заказа.
-    """
+    """Находит транзакцию списания баллов ('order_spend') для конкретного заказа."""
     return db.query(LoyaltyTransaction).filter_by(
-        user_id=user_id,
-        order_id_wc=order_id_wc,
-        type="order_spend"
+        user_id=user_id, order_id_wc=order_id_wc, type="order_spend"
     ).first()
+
+
+def get_users_with_expiring_points(db: Session) -> List[int]:
+    """Возвращает ID пользователей, у которых есть транзакции с датой сгорания."""
+    return db.query(LoyaltyTransaction.user_id).filter(
+        LoyaltyTransaction.expires_at.isnot(None)
+    ).distinct().all()

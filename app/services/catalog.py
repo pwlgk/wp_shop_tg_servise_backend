@@ -312,8 +312,11 @@ async def get_product_by_id(
     try:
         response = await wc_client.get(f"wc/v3/products/{product_id}")
         product_data = response.json()
-        
-        if product_data.get("stock_status") != "instock":
+        if product_data.get("type") == "variable":
+            variations_response = await wc_client.get(f"wc/v3/products/{product_id}/variations", params={"per_page": 100})
+            product_data["variations"] = variations_response.json()
+
+        if product_data.get("stock_status") != "instock" and not product_data.get("variations"):
             return None
 
         product = Product.model_validate(product_data)
