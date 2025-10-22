@@ -205,17 +205,21 @@ async def _enrich_orders_with_images(orders_data: List[dict]) -> List[dict]:
     if not orders_data:
         return []
 
-    # --- Шаг 1: Собираем все ID товаров и вариаций из всех заказов ---
+    # Шаг 1: Собираем ID товаров и вариаций
     all_product_ids = set()
-    all_variation_ids = set()
+    # Теперь будем хранить пары (product_id, variation_id)
+    variation_tuples_to_fetch = set()
+
     for order in orders_data:
         for item in order.get("line_items", []):
-            if item.get("product_id"):
-                all_product_ids.add(item['product_id'])
-            if item.get("variation_id"):
-                all_variation_ids.add(item['variation_id'])
+            product_id = item.get("product_id")
+            variation_id = item.get("variation_id")
+            if product_id:
+                all_product_ids.add(product_id)
+            if product_id and variation_id:
+                variation_tuples_to_fetch.add((product_id, variation_id))
     
-    # --- Шаг 2: Получаем детали для всех сущностей параллельно ---
+    # Шаг 2: Получаем детали параллельно
     product_details_map = {}
     variation_details_map = {}
 
@@ -224,34 +228,35 @@ async def _enrich_orders_with_images(orders_data: List[dict]) -> List[dict]:
         if data:
             product_details_map[product_id] = data
 
-    async def fetch_variation_details(variation_id: int):
+    # --- ИСПРАВЛЕНИЕ: Функция теперь принимает product_id ---
+    async def fetch_variation_details(product_id: int, variation_id: int):
         try:
-            # Вариации нельзя получить пакетом, запрашиваем по одной
-            response = await wc_client.get(f"wc/v3/products/variations/{variation_id}")
+            # Используем правильный URL
+            response = await wc_client.get(f"wc/v3/products/{product_id}/variations/{variation_id}")
+            response.raise_for_status() # Вызовет исключение при 404
             variation_details_map[variation_id] = response.json()
         except Exception:
-            logger.warning(f"Could not fetch details for variation ID {variation_id}")
+            logger.warning(f"Could not fetch details for variation ID {variation_id} (parent product ID {product_id})")
 
     tasks = [fetch_product_details(pid) for pid in all_product_ids]
-    tasks.extend([fetch_variation_details(vid) for vid in all_variation_ids])
+    # Создаем задачи с двумя аргументами
+    tasks.extend([fetch_variation_details(pid, vid) for pid, vid in variation_tuples_to_fetch])
     
     if tasks:
         await asyncio.gather(*tasks)
 
-    # --- Шаг 3: "Склеиваем" данные ---
+    # Шаг 3: "Склеиваем" данные (без изменений)
     for order_dict in orders_data:
         for item in order_dict.get("line_items", []):
             image_url = None
             variation_id = item.get("variation_id")
             product_id = item.get("product_id")
 
-            # Приоритет отдаем изображению вариации
             if variation_id and variation_id in variation_details_map:
                 image_data = variation_details_map[variation_id].get("image")
                 if image_data and isinstance(image_data, dict):
                     image_url = image_data.get("src")
             
-            # Если у вариации нет своего фото, берем фото родительского товара
             if not image_url and product_id and product_id in product_details_map:
                 images = product_details_map[product_id].get("images")
                 if images and isinstance(images, list) and len(images) > 0:
