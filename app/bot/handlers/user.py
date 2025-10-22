@@ -154,7 +154,7 @@ async def handle_contact(message: Message):
         # Формируем кнопку для перехода в профиль
         builder = InlineKeyboardBuilder()
         bot_username = settings.TELEGRAM_BOT_USERNAME.lstrip('@')
-        admin_app_name = getattr(settings, "TELEGRAM_ADMIN_APP_NAME", settings.TELEGRAM_ADMIN_APP_NAME)
+        admin_app_name = getattr(settings, "TELEGRAM_ADMIN_APP_NAME", settings.TELEGRAM_MINI_APP_ADMIN_NAME)
         profile_param = f"users-{user.id}"
         profile_url = f"https://t.me/{bot_username}/{admin_app_name}?startapp={profile_param}"
         builder.button(text="👤 Открыть профиль клиента", url=profile_url)
@@ -297,7 +297,7 @@ async def handle_any_user_message(message: Message):
         # Формирование кнопок
         builder = InlineKeyboardBuilder()
         bot_username = settings.TELEGRAM_BOT_USERNAME.lstrip('@')
-        admin_app_name = getattr(settings, "TELEGRAM_ADMIN_APP_NAME", settings.TELEGRAM_ADMIN_APP_NAME)
+        admin_app_name = getattr(settings, "TELEGRAM_ADMIN_APP_NAME", settings.TELEGRAM_MINI_APP_ADMIN_NAME)
         
         reply_param = f"support-dialogues-{dialogue.id}"
         profile_param = f"users-{user.id}"
