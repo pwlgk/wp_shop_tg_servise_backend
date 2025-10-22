@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import math
 from typing import List, Optional
 import httpx
 from redis.asyncio import Redis
@@ -107,6 +108,8 @@ def _filter_empty_category_branches(categories: List[ProductCategory]) -> List[P
     return valid_branches
 
 
+# app/services/catalog.py
+
 async def get_products(
     db: Session,
     redis: Redis,
@@ -124,13 +127,13 @@ async def get_products(
     featured: Optional[bool] = None
 ) -> PaginatedProducts:
     """
-    Получает пагинированный список товаров, обогащая их вариациями, миниатюрами,
-    флагом избранного и корректно обрабатывая поиск по SKU.
+    Получает пагинированный список товаров В НАЛИЧИИ, обогащая их вариациями,
+    миниатюрами, флагом избранного и корректно обрабатывая поиск по SKU.
     """
     
     # --- 1. Формирование ключа кеша ---
     cache_key_parts = [
-        "products_v6", f"page:{page}", f"size:{size}", # v6 для инвалидации
+        "products_v7", f"page:{page}", f"size:{size}", # v7 для инвалидации
         f"sku:{sku}" if sku else "", f"cat:{category}" if category else "",
         f"tag:{tag}" if tag else "", f"search:{search}" if search else "",
         f"minp:{min_price}" if min_price else "", f"maxp:{max_price}" if max_price else "",
@@ -154,12 +157,12 @@ async def get_products(
         if sku:
             # "Умный" поиск по SKU
             logger.info(f"Performing smart SKU search for '{sku}'")
-            response = await wc_client.get("wc/v3/products", params={"sku": sku})
+            response = await wc_client.get("wc/v3/products", params={"sku": sku, "stock_status": "instock"})
             response.raise_for_status()
             products_data = response.json()
 
             if not products_data:
-                variations_response = await wc_client.get("wc/v3/products/variations", params={"sku": sku})
+                variations_response = await wc_client.get("wc/v3/products/variations", params={"sku": sku, "stock_status": "instock"})
                 variations_response.raise_for_status()
                 variations_data = variations_response.json()
                 
@@ -174,7 +177,7 @@ async def get_products(
             total_pages = 1 if total_items > 0 else 0
         else:
             # Стандартный поиск/фильтрация
-            params = {"page": page, "per_page": size, "status": "publish"}
+            params = {"page": page, "per_page": size, "status": "publish", "stock_status": "instock"}
             if category: params["category"] = category
             if tag: params["tag"] = tag
             if search: params["search"] = search
@@ -202,7 +205,7 @@ async def get_products(
     # --- 3. Обогащение вариативных товаров полными данными ---
     async def fetch_variations(product_id: int):
         try:
-            var_response = await wc_client.get(f"wc/v3/products/{product_id}/variations", params={"per_page": 100})
+            var_response = await wc_client.get(f"wc/v3/products/{product_id}/variations", params={"per_page": 100, "status": "publish", "stock_status": "instock"})
             var_response.raise_for_status()
             return product_id, var_response.json()
         except Exception:
@@ -239,20 +242,26 @@ async def get_products(
             media_data = media_response.json()
             for media_item in media_data:
                 sizes = media_item.get("media_details", {}).get("sizes", {})
-                thumbnail_url = sizes.get("woocommerce_thumbnail", {}).get("source_url") or \
-                                sizes.get("medium", {}).get("source_url") or \
-                                sizes.get("full", {}).get("source_url") or \
+                thumbnail_url = (sizes.get("woocommerce_thumbnail") or {}).get("source_url") or \
+                                (sizes.get("medium") or {}).get("source_url") or \
+                                (sizes.get("full") or {}).get("source_url") or \
                                 media_item.get("source_url")
                 if thumbnail_url:
                     media_urls_map[media_item["id"]] = thumbnail_url
         except Exception as e:
             logger.error("Failed to fetch featured media details", exc_info=True)
 
-    # --- 5. Финальная сборка, обогащение "избранным" и валидация ---
+    # --- 5. Финальная сборка, обогащение "избранным", валидация и фильтрация ---
     favorite_product_ids = {item.product_id for item in get_favorite_items(db, user_id=user_id)} if user_id else set()
     enriched_products = []
     for p_data in products_data:
-        # Заменяем изображения на миниатюру
+        # Финальная проверка наличия
+        if p_data.get("type") == "variable" and not p_data.get("variations"):
+            logger.info(f"Skipping variable product ID {p_data.get('id')} because it has no available variations left.")
+            total_items -= 1 # Корректируем счетчик
+            continue
+        
+        # Обогащение миниатюрами
         product_id = p_data.get("id")
         media_id_for_product = product_to_media_map.get(product_id)
         thumbnail_url = media_urls_map.get(media_id_for_product)
@@ -267,16 +276,17 @@ async def get_products(
             enriched_products.append(product_obj)
         except Exception as e:
             logger.warning(f"Failed to validate product data for product ID {p_data.get('id')}", exc_info=True)
+            total_items -= 1 # Корректируем счетчик, если товар не прошел валидацию
             
     paginated_result = PaginatedProducts(
         total_items=total_items,
-        total_pages=total_pages,
+        total_pages=math.ceil(total_items / size) if total_items > 0 else 1,
         current_page=page,
         size=size,
         items=enriched_products
     )
     
-    if not sku: # Не кешируем прямой поиск по SKU
+    if not sku:
         await redis.set(cache_key, paginated_result.model_dump_json(), ex=CACHE_TTL_SECONDS)
     
     return paginated_result
