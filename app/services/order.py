@@ -1,5 +1,6 @@
 # app/services/order.py
 
+import asyncio
 import math
 from typing import Optional, List
 from fastapi import HTTPException, status
@@ -196,6 +197,71 @@ async def create_order_from_cart(
 
     return validated_order
 
+async def _enrich_orders_with_images(orders_data: List[dict]) -> List[dict]:
+    """
+    Вспомогательная функция для обогащения списка заказов изображениями
+    товаров и их вариаций.
+    """
+    if not orders_data:
+        return []
+
+    # --- Шаг 1: Собираем все ID товаров и вариаций из всех заказов ---
+    all_product_ids = set()
+    all_variation_ids = set()
+    for order in orders_data:
+        for item in order.get("line_items", []):
+            if item.get("product_id"):
+                all_product_ids.add(item['product_id'])
+            if item.get("variation_id"):
+                all_variation_ids.add(item['variation_id'])
+    
+    # --- Шаг 2: Получаем детали для всех сущностей параллельно ---
+    product_details_map = {}
+    variation_details_map = {}
+
+    async def fetch_product_details(product_id: int):
+        data = await catalog_service._get_any_product_by_id_from_wc(product_id)
+        if data:
+            product_details_map[product_id] = data
+
+    async def fetch_variation_details(variation_id: int):
+        try:
+            # Вариации нельзя получить пакетом, запрашиваем по одной
+            response = await wc_client.get(f"wc/v3/products/variations/{variation_id}")
+            variation_details_map[variation_id] = response.json()
+        except Exception:
+            logger.warning(f"Could not fetch details for variation ID {variation_id}")
+
+    tasks = [fetch_product_details(pid) for pid in all_product_ids]
+    tasks.extend([fetch_variation_details(vid) for vid in all_variation_ids])
+    
+    if tasks:
+        await asyncio.gather(*tasks)
+
+    # --- Шаг 3: "Склеиваем" данные ---
+    for order_dict in orders_data:
+        for item in order_dict.get("line_items", []):
+            image_url = None
+            variation_id = item.get("variation_id")
+            product_id = item.get("product_id")
+
+            # Приоритет отдаем изображению вариации
+            if variation_id and variation_id in variation_details_map:
+                image_data = variation_details_map[variation_id].get("image")
+                if image_data and isinstance(image_data, dict):
+                    image_url = image_data.get("src")
+            
+            # Если у вариации нет своего фото, берем фото родительского товара
+            if not image_url and product_id and product_id in product_details_map:
+                images = product_details_map[product_id].get("images")
+                if images and isinstance(images, list) and len(images) > 0:
+                    image_url = images[0].get("src")
+            
+            item['image_url'] = image_url
+            
+    return orders_data
+
+
 async def get_user_orders(
     current_user: User,
     page: int,
@@ -203,64 +269,38 @@ async def get_user_orders(
     status: Optional[str] = None
 ) -> PaginatedOrders:
     """
-    Получает историю заказов пользователя из WooCommerce, обогащая ее
-    изображениями товаров и флагом возможности отмены.
+    Получает историю заказов пользователя, корректно обогащая ее
+    изображениями вариаций товаров.
     """
-    # 1. Формируем параметры для WooCommerce API
     params = {
         "customer": current_user.wordpress_id,
         "page": page,
         "per_page": size
     }
-    
     if status:
-        allowed_statuses = {"any", "pending", "processing", "on-hold", "completed", "cancelled", "refunded", "failed"}
-        requested_statuses = {s.strip() for s in status.split(',')}
-        if requested_statuses.issubset(allowed_statuses):
-            params["status"] = status
-        else:
-            logger.warning(f"Invalid order statuses requested: {status}")
+        params["status"] = status
 
     response = await wc_client.get("wc/v3/orders", params=params)
+    response.raise_for_status()
     
-    # Заголовки ответа могут быть неточными, если мы фильтруем вручную, но это лучший вариант
     total_items = int(response.headers.get("X-WP-Total", 0))
     total_pages = int(response.headers.get("X-WP-TotalPages", 0))
     orders_data = response.json()
     
-    # 2. Фильтруем "сырые" данные на нашей стороне (как запасной и основной вариант)
+    # Фильтруем технические черновики
     filtered_orders_data = [
         order for order in orders_data 
         if order.get("status") != "checkout-draft"
     ]
     
-    # 3. Собираем ID всех уникальных товаров из отфильтрованных заказов
-    all_product_ids = set()
-    if filtered_orders_data and isinstance(filtered_orders_data, list):
-        for order in filtered_orders_data:
-            for item in order.get("line_items", []):
-                if item.get("product_id"):
-                    all_product_ids.add(item['product_id'])
-
-    # 4. Получаем детальную информацию для всех этих товаров
-    product_details_map = {}
-    if all_product_ids:
-        for product_id in all_product_ids:
-            product_data = await catalog_service._get_any_product_by_id_from_wc(product_id)
-            if product_data:
-                images = product_data.get("images")
-                if images and isinstance(images, list) and len(images) > 0:
-                    product_details_map[product_id] = images[0].get("src")
-
-    # 5. "Обогащаем" отфильтрованные данные
-    for order_dict in filtered_orders_data:
+    # Обогащаем отфильтрованные заказы изображениями
+    enriched_orders_data = await _enrich_orders_with_images(filtered_orders_data)
+    
+    for order_dict in enriched_orders_data:
         order_dict['can_be_cancelled'] = order_dict.get('status') in CANCELLABLE_STATUSES
-        for item in order_dict.get("line_items", []):
-            item['image_url'] = product_details_map.get(item.get('product_id'))
             
-    # 6. Валидируем и формируем ответ
     try:
-        validated_orders = [Order.model_validate(order) for order in filtered_orders_data]
+        validated_orders = [Order.model_validate(order) for order in enriched_orders_data]
     except Exception as e:
         logger.error("Failed to validate enriched order data", exc_info=True)
         validated_orders = []
@@ -272,6 +312,39 @@ async def get_user_orders(
         size=size,
         items=validated_orders
     )
+
+
+async def get_order_details(order_id: int, current_user: User) -> Order | None:
+    """
+    Получает детальную информацию о конкретном заказе, корректно
+    обогащая ее изображениями вариаций товаров.
+    """
+    try:
+        response = await wc_client.get(f"wc/v3/orders/{order_id}")
+        response.raise_for_status()
+        order_data = response.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404: return None
+        logger.error(f"Failed to fetch order details for order ID {order_id}", exc_info=True)
+        raise
+
+    if order_data.get("status") == "checkout-draft" or order_data.get("customer_id") != current_user.wordpress_id:
+        return None
+
+    # Обогащаем один заказ, передав его как список
+    enriched_orders_data = await _enrich_orders_with_images([order_data])
+    if not enriched_orders_data:
+        return None
+        
+    enriched_order_data = enriched_orders_data[0]
+    enriched_order_data['can_be_cancelled'] = enriched_order_data.get('status') in CANCELLABLE_STATUSES
+
+    try:
+        return Order.model_validate(enriched_order_data)
+    except Exception as e:
+        logger.error(f"Failed to validate enriched single order data for order ID {order_id}", exc_info=True)
+        return None
+
 
 async def cancel_order(db: Session, order_id: int, current_user: User) -> Order: # <-- Добавляем db
 
@@ -328,58 +401,3 @@ async def get_payment_gateways():
     ]
     return enabled_gateways
 
-
-async def get_order_details(order_id: int, current_user: User) -> Order | None:
-    """
-    Получает детальную информацию о конкретном заказе,
-    обогащая ее изображениями товаров (включая те, что не в наличии)
-    и флагом возможности отмены.
-    """
-    # 1. Получаем "сырые" данные о заказе от WooCommerce
-    try:
-        response = await wc_client.get(f"wc/v3/orders/{order_id}")
-        order_data = response.json()
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return None # Заказ не найден
-        logger.error(f"Failed to fetch order details for order ID {order_id}", exc_info=True)
-        raise
-
-    # 2. Проверяем, не является ли это техническим черновиком
-    if order_data.get("status") == "checkout-draft":
-        logger.warning(f"User {current_user.id} tried to access a draft order {order_id}.")
-        return None
-
-    # 3. Проверяем права доступа: принадлежит ли заказ текущему пользователю
-    if order_data.get("customer_id") != current_user.wordpress_id:
-        logger.warning(f"User {current_user.id} tried to access order {order_id} belonging to another customer.")
-        return None
-
-    # 4. Собираем ID товаров для "обогащения"
-    all_product_ids = {
-        item.get('product_id') 
-        for item in order_data.get("line_items", []) 
-        if item.get('product_id')
-    }
-
-    # 5. Получаем детали товаров, включая те, что не в наличии
-    product_details_map = {}
-    if all_product_ids:
-        for product_id in all_product_ids:
-            product_data = await catalog_service._get_any_product_by_id_from_wc(product_id)
-            if product_data:
-                images = product_data.get("images")
-                if images and isinstance(images, list) and len(images) > 0:
-                    product_details_map[product_id] = images[0].get("src")
-
-    # 6. "Склеиваем" данные
-    order_data['can_be_cancelled'] = order_data.get('status') in CANCELLABLE_STATUSES
-    for item in order_data.get("line_items", []):
-        item['image_url'] = product_details_map.get(item.get('product_id'))
-
-    # 7. Валидируем и возвращаем результат
-    try:
-        return Order.model_validate(order_data)
-    except Exception as e:
-        logger.error(f"Failed to validate enriched single order data for order ID {order_id}", exc_info=True)
-        return None
