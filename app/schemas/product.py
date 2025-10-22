@@ -1,7 +1,7 @@
 # app/schemas/product.py
 from datetime import datetime
-from pydantic import BaseModel, Field
-from typing import Generic, List, Optional, TypeVar
+from pydantic import BaseModel, Field, field_validator
+from typing import Generic, List, Optional, TypeVar, Union
 
 from .notification import Notification
 from app.schemas.order import Order
@@ -10,10 +10,26 @@ class ProductCategory(BaseModel):
     id: int
     name: str
     slug: str
-    image_src: Optional[str] = None
-    children: List['ProductCategory'] = [] # <-- Добавляем поле для дочерних категорий
+    
+    # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
+    # Временно разрешаем принимать строку, None или bool
+    image_src: Union[str, None, bool] = None 
+    
+    @field_validator('image_src', mode='before')
+    @classmethod
+    def validate_image_src(cls, v):
+        # Этот валидатор сработает до основной проверки типов.
+        # Он преобразует False или любой другой "ложный" инпут в None,
+        # а валидные строки оставит как есть.
+        if isinstance(v, str) and v:
+            return v
+        return None
+    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+    children: List['ProductCategory'] = []
     count: int
     has_in_stock_products: bool = False
+    
     class Config:
         from_attributes = True
 
