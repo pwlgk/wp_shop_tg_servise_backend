@@ -451,42 +451,35 @@ async def get_product_by_id(
     user_id: Optional[int] = None
 ) -> Optional[Product]:
     """
-    Получает детальную информацию о товаре по ID, включая все вариации,
-    даже если товара нет в наличии. Обогащает ее флагами is_favorite
-    и can_review для текущего пользователя.
+    Получает детальную информацию о товаре по ID. Если товар не найден (404),
+    тихо возвращает None, корректно обрабатывая исключение от HTTP-клиента.
     """
     cache_key = f"product:{product_id}:user:{user_id}" if user_id else f"product:{product_id}"
 
     cached_product = await redis.get(cache_key)
     if cached_product:
-        # Если в кеше "null", значит товара не существует, возвращаем None
         if cached_product == "null":
             return None
         return Product.model_validate(json.loads(cached_product))
     
     try:
+        # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
+        # Этот вызов может сгенерировать httpx.HTTPStatusError при ошибке 404
         response = await wc_client.get(f"wc/v3/products/{product_id}")
         
-        # Явно обрабатываем 404, чтобы не вызывать исключение
-        if response.status_code == 404:
-            logger.warning(f"Product with ID {product_id} not found in WooCommerce (404).")
-            await redis.set(cache_key, "null", ex=CACHE_TTL_SECONDS) # Кешируем "ненайденность"
-            return None
-
-        response.raise_for_status() # Вызовет ошибку для 5xx или других 4xx
+        # raise_for_status() теперь вызывается внутри wc_client.get,
+        # поэтому нам нужно обернуть вызов в try...except
+        
         product_data = response.json()
         
-        # Получаем вариации, если они есть
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+        
         if product_data.get("type") == "variable":
             variations_response = await wc_client.get(f"wc/v3/products/{product_id}/variations", params={"per_page": 100})
             variations_response.raise_for_status()
             product_data["variations"] = variations_response.json()
         
-        # --- БЛОК ПРОВЕРКИ НАЛИЧИЯ УДАЛЕН ---
-        # Теперь мы не возвращаем None, если товара нет на складе.
-        # Фронтенд сам будет анализировать поле 'stock_status'.
-
-        # Логика обогащения флагами is_favorite и can_review
+        # Логика обогащения флагами
         is_favorite = False
         can_review = False
         
@@ -498,7 +491,6 @@ async def get_product_by_id(
             if user:
                 with get_db_context() as session:
                     is_favorite = crud_cart.get_favorite_item(session, user_id=user.id, product_id=product_id) is not None
-
                 can_review = await review_service.check_if_user_can_review(user, product_id)
 
         product_data["is_favorite"] = is_favorite
@@ -511,13 +503,22 @@ async def get_product_by_id(
         return product
         
     except httpx.HTTPStatusError as e:
-        # Ловим другие ошибки, кроме 404
+        # --- ЯВНАЯ ОБРАБОТКА ОШИБКИ 404 ---
+        # Если исключение вызвано ошибкой 404, это не критическая ошибка.
+        # Просто логируем и возвращаем None.
+        if e.response.status_code == 404:
+            logger.warning(f"Product with ID {product_id} not found in WooCommerce (404).")
+            await redis.set(cache_key, "null", ex=CACHE_TTL_SECONDS) # Кешируем "ненайденность"
+            return None
+        
+        # Все остальные HTTP-ошибки (500, 401, 403 и т.д.) считаем критическими
         logger.error(f"HTTP error fetching product by ID {product_id}: {e.response.status_code}", exc_info=True)
-        return None
+        return None # Также возвращаем None, чтобы не "сломать" приложение
+        
     except Exception as e:
+        # Ловим любые другие непредвиденные ошибки
         logger.error(f"Unexpected error fetching product by ID {product_id}", exc_info=True)
         return None
-    
 
 async def _get_any_product_by_id_from_wc(product_id: int) -> dict | None:
     """Получает 'сырые' данные о товаре, игнорируя кеш и статус наличия."""
