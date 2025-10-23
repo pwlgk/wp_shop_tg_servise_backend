@@ -158,7 +158,6 @@ async def create_review_for_product(user: User, product_id: int, review_data: Re
 
     return ProductReviewSchema.model_validate(created_review_data)
 
-
 async def check_if_user_can_review(user: User, product_id: int) -> bool:
     """
     Проверяет, покупал ли пользователь данный товар и не оставлял ли уже отзыв.
@@ -168,7 +167,18 @@ async def check_if_user_can_review(user: User, product_id: int) -> bool:
         return False
         
     try:
-        # --- Используем asyncio.gather для параллельного выполнения обоих запросов ---
+        # --- Шаг 1: Получаем актуальный email пользователя из WooCommerce ---
+        # Это важно, так как пользователь мог его изменить в профиле WP.
+        customer_response = await wc_client.get(f"wc/v3/customers/{user.wordpress_id}")
+        customer_response.raise_for_status()
+        customer_data = customer_response.json()
+        reviewer_email = customer_data.get("email")
+
+        if not reviewer_email:
+            logger.warning(f"User {user.id} (WP ID: {user.wordpress_id}) does not have an email in WooCommerce profile.")
+            return False
+
+        # --- Шаг 2: Параллельно проверяем историю покупок и наличие отзывов ---
         orders_task = wc_client.get("wc/v3/orders", params={
             "customer": user.wordpress_id,
             "product": product_id,
@@ -176,12 +186,10 @@ async def check_if_user_can_review(user: User, product_id: int) -> bool:
             "per_page": 1
         })
         
-        # --- ИСПРАВЛЕНИЕ: Ищем отзывы по ID автора (reviewer) ---
-        # Это самый надежный способ, так как ID не меняется, в отличие от email.
+        # --- ИСПРАВЛЕНИЕ: Ищем отзывы по email'у ---
         reviews_task = wc_client.get("wc/v3/products/reviews", params={
-            "reviewer": user.wordpress_id,
-            "product": product_id,
-            "per_page": 1 # Нам достаточно найти хотя бы один
+            "reviewer_email": reviewer_email,
+            "product": product_id
         })
 
         orders_response, reviews_response = await asyncio.gather(orders_task, reviews_task)
@@ -189,18 +197,18 @@ async def check_if_user_can_review(user: User, product_id: int) -> bool:
         orders_response.raise_for_status()
         reviews_response.raise_for_status()
         
-        # --- Анализ результатов ---
+        # --- Шаг 3: Анализ результатов ---
         has_purchased = int(orders_response.headers.get("X-WP-Total", 0)) > 0
         
-        # Проверяем не по длине массива, а по заголовку, это надежнее
-        has_already_reviewed = int(reviews_response.headers.get("X-WP-Total", 0)) > 0
+        # WooCommerce вернет массив отзывов. Если он не пустой, значит, отзыв уже есть.
+        reviews_list = reviews_response.json()
+        has_already_reviewed = isinstance(reviews_list, list) and len(reviews_list) > 0
         
         logger.info(
             f"Review eligibility check for user {user.id} on product {product_id}: "
             f"Has purchased? {has_purchased}, Has already reviewed? {has_already_reviewed}"
         )
 
-        # Пользователь может оставить отзыв, если он покупал товар И еще не оставлял отзыв.
         return has_purchased and not has_already_reviewed
 
     except Exception:
