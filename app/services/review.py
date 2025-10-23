@@ -1,5 +1,6 @@
 # app/services/review.py
 
+import asyncio
 import httpx
 import logging
 from typing import List
@@ -156,3 +157,42 @@ async def create_review_for_product(user: User, product_id: int, review_data: Re
             logger.warning(f"Could not fetch media details for newly created review {created_review_data['id']}")
 
     return ProductReviewSchema.model_validate(created_review_data)
+
+
+async def check_if_user_can_review(user: User, product_id: int) -> bool:
+    """
+    Проверяет, покупал ли пользователь данный товар и не оставлял ли уже отзыв.
+    Возвращает True, если пользователь может оставить отзыв.
+    """
+    if not user:
+        return False
+        
+    try:
+        # --- Используем asyncio.gather для параллельного выполнения обоих запросов ---
+        orders_task = wc_client.get("wc/v3/orders", params={
+            "customer": user.wordpress_id,
+            "product": product_id,
+            "status": "completed",
+            "per_page": 1
+        })
+        
+        # --- ИСПРАВЛЕНИЕ: Ищем отзывы по ID покупателя, а не по email ---
+        reviews_task = wc_client.get("wc/v3/products/reviews", params={
+            "customer": user.wordpress_id,
+            "product": product_id
+        })
+
+        orders_response, reviews_response = await asyncio.gather(orders_task, reviews_task)
+        
+        orders_response.raise_for_status()
+        reviews_response.raise_for_status()
+        
+        # --- Анализ результатов ---
+        has_purchased = int(orders_response.headers.get("X-WP-Total", 0)) > 0
+        has_already_reviewed = len(reviews_response.json()) > 0
+        
+        return has_purchased and not has_already_reviewed
+
+    except Exception:
+        logger.warning(f"Failed to check review eligibility for user {user.id} and product {product_id}", exc_info=True)
+        return False

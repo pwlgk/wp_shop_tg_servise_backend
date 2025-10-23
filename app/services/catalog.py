@@ -10,8 +10,13 @@ from redis.asyncio import Redis
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.clients.woocommerce import wc_client
+from app.dependencies import get_db_context
+from app.models.user import User
 from app.schemas.product import ProductCategory, Product, PaginatedProducts
 from app.crud.cart import get_favorite_items
+from app.services import review as review_service
+from app.crud import cart as crud_cart
+
 
 logger = logging.getLogger(__name__)
 
@@ -298,51 +303,71 @@ async def get_product_by_id(
     user_id: Optional[int] = None
 ) -> Optional[Product]:
     """
-    Получает детальную информацию о товаре по ID, включая все вариации.
+    Получает детальную информацию о товаре по ID, включая все вариации,
+    даже если товара нет в наличии. Обогащает ее флагами is_favorite
+    и can_review для текущего пользователя.
     """
     cache_key = f"product:{product_id}:user:{user_id}" if user_id else f"product:{product_id}"
 
     cached_product = await redis.get(cache_key)
     if cached_product:
+        # Если в кеше "null", значит товара не существует, возвращаем None
+        if cached_product == "null":
+            return None
         return Product.model_validate(json.loads(cached_product))
     
     try:
         response = await wc_client.get(f"wc/v3/products/{product_id}")
-        product_data = response.json()
         
-        if product_data.get("type") == "variable":
-            variations_response = await wc_client.get(f"wc/v3/products/{product_id}/variations", params={"per_page": 100})
-            product_data["variations"] = variations_response.json()
-        
-        # Проверяем, есть ли товар в наличии (либо сам, либо хотя бы одна вариация)
-        is_in_stock = False
-        if product_data.get("stock_status") == "instock":
-            is_in_stock = True
-        elif product_data.get("variations"):
-            is_in_stock = any(v.get("stock_status") == "instock" for v in product_data["variations"])
-        
-        if not is_in_stock:
+        # --- ИЗМЕНЕНИЕ: Обрабатываем 404, но не фильтруем по наличию ---
+        # Если WooCommerce вернул 404, значит товара в принципе не существует
+        if response.status_code == 404:
+            logger.warning(f"Product with ID {product_id} not found in WooCommerce (404).")
+            # Кешируем "пустой" результат, чтобы не запрашивать несуществующий товар снова
+            await redis.set(cache_key, "null", ex=CACHE_TTL_SECONDS)
             return None
 
-        product = Product.model_validate(product_data)
+        response.raise_for_status() # Вызовет ошибку для 5xx или других 4xx
+        product_data = response.json()
+        
+        # Получаем вариации, если они есть
+        if product_data.get("type") == "variable":
+            variations_response = await wc_client.get(f"wc/v3/products/{product_id}/variations", params={"per_page": 100})
+            variations_response.raise_for_status()
+            product_data["variations"] = variations_response.json()
+        
+        # --- БЛОК ПРОВЕРКИ НАЛИЧИЯ УДАЛЕН ---
+        # Теперь мы не возвращаем None, если товара нет на складе.
+        # Фронтенд сам будет анализировать поле 'stock_status'.
 
+        # Логика обогащения флагами is_favorite и can_review
+        is_favorite = False
+        can_review = False
+        
         if user_id:
-            favorite_items_db = get_favorite_items(db, user_id=user_id)
-            favorite_product_ids = {item.product_id for item in favorite_items_db}
-            product.is_favorite = product.id in favorite_product_ids
+            user = None
+            with get_db_context() as session:
+                user = session.query(User).filter(User.id == user_id).first()
+
+            if user:
+                with get_db_context() as session:
+                    is_favorite = crud_cart.get_favorite_item(session, user_id=user.id, product_id=product_id) is not None
+
+                can_review = await review_service.check_if_user_can_review(user, product_id)
+
+        product_data["is_favorite"] = is_favorite
+        product_data["can_review"] = can_review
+        
+        product = Product.model_validate(product_data)
         
         await redis.set(cache_key, product.model_dump_json(), ex=CACHE_TTL_SECONDS)
         
         return product
-    except Exception as e:
-        logger.error(f"Error fetching product by ID {product_id}", exc_info=True)
+        
+    except httpx.HTTPStatusError as e:
+        # Ловим другие ошибки, кроме 404
+        logger.error(f"HTTP error fetching product by ID {product_id}: {e.response.status_code}", exc_info=True)
         return None
-
-async def _get_any_product_by_id_from_wc(product_id: int) -> dict | None:
-    """Получает 'сырые' данные о товаре, игнорируя кеш и статус наличия."""
-    try:
-        response = await wc_client.get(f"wc/v3/products/{product_id}")
-        return response.json()
-    except Exception:
-        logger.warning(f"Could not fetch raw product data from WC for product ID {product_id}.")
+    except Exception as e:
+        logger.error(f"Unexpected error fetching product by ID {product_id}", exc_info=True)
         return None

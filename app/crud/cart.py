@@ -84,3 +84,7 @@ def remove_favorite_item(db: Session, user_id: int, product_id: int) -> bool:
         db.commit()
         return True
     return False
+
+def get_favorite_item(db: Session, user_id: int, product_id: int) -> FavoriteItem | None:
+    """Проверяет, находится ли КОНКРЕТНЫЙ товар в избранном у пользователя."""
+    return db.query(FavoriteItem).filter_by(user_id=user_id, product_id=product_id).first()

@@ -108,6 +108,7 @@ class Product(BaseModel):
     variations: List[ProductVariationSchema] | None = None
     average_rating: str  # WooCommerce отдает это как строку, например "4.50"
     rating_count: int 
+    can_review: bool = False 
 
     class Config:
         from_attributes = True
