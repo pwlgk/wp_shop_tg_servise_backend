@@ -176,10 +176,12 @@ async def check_if_user_can_review(user: User, product_id: int) -> bool:
             "per_page": 1
         })
         
-        # --- ИСПРАВЛЕНИЕ: Ищем отзывы по ID покупателя, а не по email ---
+        # --- ИСПРАВЛЕНИЕ: Ищем отзывы по ID автора (reviewer) ---
+        # Это самый надежный способ, так как ID не меняется, в отличие от email.
         reviews_task = wc_client.get("wc/v3/products/reviews", params={
-            "customer": user.wordpress_id,
-            "product": product_id
+            "reviewer": user.wordpress_id,
+            "product": product_id,
+            "per_page": 1 # Нам достаточно найти хотя бы один
         })
 
         orders_response, reviews_response = await asyncio.gather(orders_task, reviews_task)
@@ -189,8 +191,16 @@ async def check_if_user_can_review(user: User, product_id: int) -> bool:
         
         # --- Анализ результатов ---
         has_purchased = int(orders_response.headers.get("X-WP-Total", 0)) > 0
-        has_already_reviewed = len(reviews_response.json()) > 0
         
+        # Проверяем не по длине массива, а по заголовку, это надежнее
+        has_already_reviewed = int(reviews_response.headers.get("X-WP-Total", 0)) > 0
+        
+        logger.info(
+            f"Review eligibility check for user {user.id} on product {product_id}: "
+            f"Has purchased? {has_purchased}, Has already reviewed? {has_already_reviewed}"
+        )
+
+        # Пользователь может оставить отзыв, если он покупал товар И еще не оставлял отзыв.
         return has_purchased and not has_already_reviewed
 
     except Exception:
