@@ -371,3 +371,13 @@ async def get_product_by_id(
     except Exception as e:
         logger.error(f"Unexpected error fetching product by ID {product_id}", exc_info=True)
         return None
+    
+
+async def _get_any_product_by_id_from_wc(product_id: int) -> dict | None:
+    """Получает 'сырые' данные о товаре, игнорируя кеш и статус наличия."""
+    try:
+        response = await wc_client.get(f"wc/v3/products/{product_id}")
+        return response.json()
+    except Exception:
+        logger.warning(f"Could not fetch raw product data from WC for product ID {product_id}.")
+        return None
