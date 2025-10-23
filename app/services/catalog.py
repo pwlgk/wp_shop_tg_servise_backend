@@ -115,188 +115,6 @@ def _filter_empty_category_branches(categories: List[ProductCategory]) -> List[P
 
 # app/services/catalog.py
 
-# async def get_products(
-#     db: Session,
-#     redis: Redis,
-#     page: int,
-#     size: int,
-#     user_id: Optional[int] = None,
-#     sku: Optional[str] = None,
-#     category: Optional[int] = None,
-#     tag: Optional[int] = None,
-#     search: Optional[str] = None,
-#     min_price: Optional[float] = None,
-#     max_price: Optional[float] = None,
-#     orderby: Optional[str] = None,
-#     order: Optional[str] = None,
-#     featured: Optional[bool] = None
-# ) -> PaginatedProducts:
-#     """
-#     Получает пагинированный список товаров В НАЛИЧИИ, обогащая их вариациями,
-#     миниатюрами, флагом избранного и корректно обрабатывая поиск по SKU.
-#     """
-    
-#     # --- 1. Формирование ключа кеша ---
-#     cache_key_parts = [
-#         "products_v7", f"page:{page}", f"size:{size}", # v7 для инвалидации
-#         f"sku:{sku}" if sku else "", f"cat:{category}" if category else "",
-#         f"tag:{tag}" if tag else "", f"search:{search}" if search else "",
-#         f"minp:{min_price}" if min_price else "", f"maxp:{max_price}" if max_price else "",
-#         f"orderby:{orderby}" if orderby else "", f"order:{order}" if order else "",
-#         f"feat:{featured}" if featured else ""
-#     ]
-#     base_cache_key = ":".join(filter(None, cache_key_parts))
-#     cache_key = f"{base_cache_key}:user:{user_id}" if user_id else base_cache_key
-
-#     cached_products = await redis.get(cache_key)
-#     if cached_products:
-#         logger.info(f"Serving products from cache for key: {cache_key}")
-#         return PaginatedProducts.model_validate(json.loads(cached_products))
-
-#     # --- 2. Получение базовых данных из WooCommerce ---
-#     products_data: List[dict] = []
-#     total_items = 0
-#     total_pages = 0
-    
-#     try:
-#         if sku:
-#             # "Умный" поиск по SKU
-#             logger.info(f"Performing smart SKU search for '{sku}'")
-#             response = await wc_client.get("wc/v3/products", params={"sku": sku, "stock_status": "instock"})
-#             response.raise_for_status()
-#             products_data = response.json()
-
-#             if not products_data:
-#                 variations_response = await wc_client.get("wc/v3/products/variations", params={"sku": sku, "stock_status": "instock"})
-#                 variations_response.raise_for_status()
-#                 variations_data = variations_response.json()
-                
-#                 if variations_data and isinstance(variations_data, list):
-#                     parent_id = variations_data[0].get("parent_id")
-#                     if parent_id:
-#                         parent_product_response = await wc_client.get(f"wc/v3/products/{parent_id}")
-#                         parent_product_response.raise_for_status()
-#                         products_data = [parent_product_response.json()]
-            
-#             total_items = len(products_data)
-#             total_pages = 1 if total_items > 0 else 0
-#         else:
-#             # Стандартный поиск/фильтрация
-#             params = {"page": page, "per_page": size, "status": "publish", "stock_status": "instock"}
-#             if category: params["category"] = category
-#             if tag: params["tag"] = tag
-#             if search: params["search"] = search
-#             if min_price is not None: params["min_price"] = min_price
-#             if max_price is not None: params["max_price"] = max_price
-#             if orderby in ["date", "id", "title", "price", "popularity", "rating"]: params["orderby"] = orderby
-#             if order in ["asc", "desc"]: params["order"] = order
-#             if featured: params["featured"] = featured
-            
-#             logger.info(f"Fetching products from WC with params: {params}")
-#             response = await wc_client.get("wc/v3/products", params=params)
-#             response.raise_for_status()
-            
-#             products_data = response.json()
-#             total_items = int(response.headers.get("X-WP-Total", 0))
-#             total_pages = int(response.headers.get("X-WP-TotalPages", 0))
-
-#     except httpx.HTTPStatusError as e:
-#         logger.error(f"HTTP error while fetching products: {e.response.status_code} - {e.response.text}", exc_info=True)
-#         return PaginatedProducts(total_items=0, total_pages=0, current_page=page, size=size, items=[])
-    
-#     if not isinstance(products_data, list):
-#         products_data = []
-
-#     # --- 3. Обогащение вариативных товаров полными данными ---
-#     async def fetch_variations(product_id: int):
-#         try:
-#             var_response = await wc_client.get(f"wc/v3/products/{product_id}/variations", params={"per_page": 100, "status": "publish", "stock_status": "instock"})
-#             var_response.raise_for_status()
-#             return product_id, var_response.json()
-#         except Exception:
-#             return product_id, []
-
-#     tasks = [fetch_variations(p['id']) for p in products_data if p.get("type") == "variable"]
-#     if tasks:
-#         results = await asyncio.gather(*tasks)
-#         variations_map = dict(results)
-#         for p_data in products_data:
-#             if p_data.get("id") in variations_map:
-#                 p_data["variations"] = variations_map[p_data["id"]]
-
-#     # --- 4. Обогащение миниатюрами ---
-#     media_ids_to_fetch = set()
-#     product_to_media_map = {}
-#     for p_data in products_data:
-#         media_id = p_data.get("featured_media")
-#         if not media_id or media_id == 0:
-#             images = p_data.get("images", [])
-#             if images and isinstance(images, list) and len(images) > 0:
-#                 media_id = images[0].get("id")
-#         if media_id and media_id > 0:
-#             media_ids_to_fetch.add(media_id)
-#             product_to_media_map[p_data["id"]] = media_id
-    
-#     media_urls_map = {}
-#     if media_ids_to_fetch:
-#         try:
-#             media_url = f"{settings.WP_URL}/wp-json/wp/v2/media"
-#             media_params = {"include": ",".join(map(str, list(media_ids_to_fetch))), "per_page": len(media_ids_to_fetch)}
-#             media_response = await wc_client.async_client.get(media_url, params=media_params)
-#             media_response.raise_for_status()
-#             media_data = media_response.json()
-#             for media_item in media_data:
-#                 sizes = media_item.get("media_details", {}).get("sizes", {})
-#                 thumbnail_url = (sizes.get("woocommerce_thumbnail") or {}).get("source_url") or \
-#                                 (sizes.get("medium") or {}).get("source_url") or \
-#                                 (sizes.get("full") or {}).get("source_url") or \
-#                                 media_item.get("source_url")
-#                 if thumbnail_url:
-#                     media_urls_map[media_item["id"]] = thumbnail_url
-#         except Exception as e:
-#             logger.error("Failed to fetch featured media details", exc_info=True)
-
-#     # --- 5. Финальная сборка, обогащение "избранным", валидация и фильтрация ---
-#     favorite_product_ids = {item.product_id for item in get_favorite_items(db, user_id=user_id)} if user_id else set()
-#     enriched_products = []
-#     for p_data in products_data:
-#         # Финальная проверка наличия
-#         if p_data.get("type") == "variable" and not p_data.get("variations"):
-#             logger.info(f"Skipping variable product ID {p_data.get('id')} because it has no available variations left.")
-#             total_items -= 1 # Корректируем счетчик
-#             continue
-        
-#         # Обогащение миниатюрами
-#         product_id = p_data.get("id")
-#         media_id_for_product = product_to_media_map.get(product_id)
-#         thumbnail_url = media_urls_map.get(media_id_for_product)
-#         if thumbnail_url:
-#             p_data["images"] = [{"id": media_id_for_product or 0, "src": thumbnail_url, "alt": ""}]
-#         elif not p_data.get("images"):
-#             p_data["images"] = []
-        
-#         try:
-#             product_obj = Product.model_validate(p_data)
-#             product_obj.is_favorite = product_obj.id in favorite_product_ids
-#             enriched_products.append(product_obj)
-#         except Exception as e:
-#             logger.warning(f"Failed to validate product data for product ID {p_data.get('id')}", exc_info=True)
-#             total_items -= 1 # Корректируем счетчик, если товар не прошел валидацию
-            
-#     paginated_result = PaginatedProducts(
-#         total_items=total_items,
-#         total_pages=math.ceil(total_items / size) if total_items > 0 else 1,
-#         current_page=page,
-#         size=size,
-#         items=enriched_products
-#     )
-    
-#     if not sku:
-#         await redis.set(cache_key, paginated_result.model_dump_json(), ex=CACHE_TTL_SECONDS)
-    
-#     return paginated_result
-
-
 async def get_products(
     db: Session,
     redis: Redis,
@@ -314,13 +132,13 @@ async def get_products(
     featured: Optional[bool] = None
 ) -> PaginatedProducts:
     """
-    Получает пагинированный список товаров В НАЛИЧИИ, обогащая их вариациями
-    и флагом избранного. Возвращает все изображения в оригинальном качестве.
+    Получает пагинированный список товаров В НАЛИЧИИ, обогащая их вариациями,
+    миниатюрами, флагом избранного и корректно обрабатывая поиск по SKU.
     """
     
     # --- 1. Формирование ключа кеша ---
     cache_key_parts = [
-        "products_v8", f"page:{page}", f"size:{size}", # v8 для инвалидации
+        "products_v7", f"page:{page}", f"size:{size}", # v7 для инвалидации
         f"sku:{sku}" if sku else "", f"cat:{category}" if category else "",
         f"tag:{tag}" if tag else "", f"search:{search}" if search else "",
         f"minp:{min_price}" if min_price else "", f"maxp:{max_price}" if max_price else "",
@@ -335,7 +153,7 @@ async def get_products(
         logger.info(f"Serving products from cache for key: {cache_key}")
         return PaginatedProducts.model_validate(json.loads(cached_products))
 
-    # --- 2. Логика получения данных из WooCommerce ---
+    # --- 2. Получение базовых данных из WooCommerce ---
     products_data: List[dict] = []
     total_items = 0
     total_pages = 0
@@ -406,19 +224,59 @@ async def get_products(
             if p_data.get("id") in variations_map:
                 p_data["variations"] = variations_map[p_data["id"]]
 
-    # --- 4. Финальная сборка, обогащение "избранным" и валидация ---
+    # --- 4. Обогащение миниатюрами ---
+    media_ids_to_fetch = set()
+    product_to_media_map = {}
+    for p_data in products_data:
+        media_id = p_data.get("featured_media")
+        if not media_id or media_id == 0:
+            images = p_data.get("images", [])
+            if images and isinstance(images, list) and len(images) > 0:
+                media_id = images[0].get("id")
+        if media_id and media_id > 0:
+            media_ids_to_fetch.add(media_id)
+            product_to_media_map[p_data["id"]] = media_id
+    
+    media_urls_map = {}
+    if media_ids_to_fetch:
+        try:
+            media_url = f"{settings.WP_URL}/wp-json/wp/v2/media"
+            media_params = {"include": ",".join(map(str, list(media_ids_to_fetch))), "per_page": len(media_ids_to_fetch)}
+            media_response = await wc_client.async_client.get(media_url, params=media_params)
+            media_response.raise_for_status()
+            media_data = media_response.json()
+            for media_item in media_data:
+                sizes = media_item.get("media_details", {}).get("sizes", {})
+                thumbnail_url = (
+                    (sizes.get("large") or {}).get("source_url") or
+                    (sizes.get("medium_large") or {}).get("source_url") or
+                    (sizes.get("medium") or {}).get("source_url") or
+                    (sizes.get("full") or {}).get("source_url") or  # В крайнем случае берем оригинал
+                    media_item.get("source_url")
+                )
+                if thumbnail_url:
+                    media_urls_map[media_item["id"]] = thumbnail_url
+        except Exception as e:
+            logger.error("Failed to fetch featured media details", exc_info=True)
+
+    # --- 5. Финальная сборка, обогащение "избранным", валидация и фильтрация ---
     favorite_product_ids = {item.product_id for item in get_favorite_items(db, user_id=user_id)} if user_id else set()
     enriched_products = []
-    
     for p_data in products_data:
         # Финальная проверка наличия
         if p_data.get("type") == "variable" and not p_data.get("variations"):
             logger.info(f"Skipping variable product ID {p_data.get('id')} because it has no available variations left.")
-            total_items -= 1
+            total_items -= 1 # Корректируем счетчик
             continue
         
-        # --- ЛОГИКА ОБОГАЩЕНИЯ МИНИАТЮРАМИ ПОЛНОСТЬЮ УДАЛЕНА ---
-        # Мы просто доверяем данным, которые пришли от WooCommerce в поле 'images'.
+        # Обогащение миниатюрами
+        product_id = p_data.get("id")
+        media_id_for_product = product_to_media_map.get(product_id)
+        thumbnail_url = media_urls_map.get(media_id_for_product)
+        if thumbnail_url:
+            p_data["images"] = [{"id": media_id_for_product or 0, "src": thumbnail_url, "alt": ""}]
+        elif not p_data.get("images"):
+            p_data["images"] = []
         
         try:
             product_obj = Product.model_validate(p_data)
@@ -426,7 +284,7 @@ async def get_products(
             enriched_products.append(product_obj)
         except Exception as e:
             logger.warning(f"Failed to validate product data for product ID {p_data.get('id')}", exc_info=True)
-            total_items -= 1
+            total_items -= 1 # Корректируем счетчик, если товар не прошел валидацию
             
     paginated_result = PaginatedProducts(
         total_items=total_items,
@@ -440,6 +298,151 @@ async def get_products(
         await redis.set(cache_key, paginated_result.model_dump_json(), ex=CACHE_TTL_SECONDS)
     
     return paginated_result
+
+
+# async def get_products(
+#     db: Session,
+#     redis: Redis,
+#     page: int,
+#     size: int,
+#     user_id: Optional[int] = None,
+#     sku: Optional[str] = None,
+#     category: Optional[int] = None,
+#     tag: Optional[int] = None,
+#     search: Optional[str] = None,
+#     min_price: Optional[float] = None,
+#     max_price: Optional[float] = None,
+#     orderby: Optional[str] = None,
+#     order: Optional[str] = None,
+#     featured: Optional[bool] = None
+# ) -> PaginatedProducts:
+#     """
+#     Получает пагинированный список товаров В НАЛИЧИИ, обогащая их вариациями
+#     и флагом избранного. Возвращает все изображения в оригинальном качестве.
+#     """
+    
+#     # --- 1. Формирование ключа кеша ---
+#     cache_key_parts = [
+#         "products_v8", f"page:{page}", f"size:{size}", # v8 для инвалидации
+#         f"sku:{sku}" if sku else "", f"cat:{category}" if category else "",
+#         f"tag:{tag}" if tag else "", f"search:{search}" if search else "",
+#         f"minp:{min_price}" if min_price else "", f"maxp:{max_price}" if max_price else "",
+#         f"orderby:{orderby}" if orderby else "", f"order:{order}" if order else "",
+#         f"feat:{featured}" if featured else ""
+#     ]
+#     base_cache_key = ":".join(filter(None, cache_key_parts))
+#     cache_key = f"{base_cache_key}:user:{user_id}" if user_id else base_cache_key
+
+#     cached_products = await redis.get(cache_key)
+#     if cached_products:
+#         logger.info(f"Serving products from cache for key: {cache_key}")
+#         return PaginatedProducts.model_validate(json.loads(cached_products))
+
+#     # --- 2. Логика получения данных из WooCommerce ---
+#     products_data: List[dict] = []
+#     total_items = 0
+#     total_pages = 0
+    
+#     try:
+#         if sku:
+#             # "Умный" поиск по SKU
+#             logger.info(f"Performing smart SKU search for '{sku}'")
+#             response = await wc_client.get("wc/v3/products", params={"sku": sku, "stock_status": "instock"})
+#             response.raise_for_status()
+#             products_data = response.json()
+
+#             if not products_data:
+#                 variations_response = await wc_client.get("wc/v3/products/variations", params={"sku": sku, "stock_status": "instock"})
+#                 variations_response.raise_for_status()
+#                 variations_data = variations_response.json()
+                
+#                 if variations_data and isinstance(variations_data, list):
+#                     parent_id = variations_data[0].get("parent_id")
+#                     if parent_id:
+#                         parent_product_response = await wc_client.get(f"wc/v3/products/{parent_id}")
+#                         parent_product_response.raise_for_status()
+#                         products_data = [parent_product_response.json()]
+            
+#             total_items = len(products_data)
+#             total_pages = 1 if total_items > 0 else 0
+#         else:
+#             # Стандартный поиск/фильтрация
+#             params = {"page": page, "per_page": size, "status": "publish", "stock_status": "instock"}
+#             if category: params["category"] = category
+#             if tag: params["tag"] = tag
+#             if search: params["search"] = search
+#             if min_price is not None: params["min_price"] = min_price
+#             if max_price is not None: params["max_price"] = max_price
+#             if orderby in ["date", "id", "title", "price", "popularity", "rating"]: params["orderby"] = orderby
+#             if order in ["asc", "desc"]: params["order"] = order
+#             if featured: params["featured"] = featured
+            
+#             logger.info(f"Fetching products from WC with params: {params}")
+#             response = await wc_client.get("wc/v3/products", params=params)
+#             response.raise_for_status()
+            
+#             products_data = response.json()
+#             total_items = int(response.headers.get("X-WP-Total", 0))
+#             total_pages = int(response.headers.get("X-WP-TotalPages", 0))
+
+#     except httpx.HTTPStatusError as e:
+#         logger.error(f"HTTP error while fetching products: {e.response.status_code} - {e.response.text}", exc_info=True)
+#         return PaginatedProducts(total_items=0, total_pages=0, current_page=page, size=size, items=[])
+    
+#     if not isinstance(products_data, list):
+#         products_data = []
+
+#     # --- 3. Обогащение вариативных товаров полными данными ---
+#     async def fetch_variations(product_id: int):
+#         try:
+#             var_response = await wc_client.get(f"wc/v3/products/{product_id}/variations", params={"per_page": 100, "status": "publish", "stock_status": "instock"})
+#             var_response.raise_for_status()
+#             return product_id, var_response.json()
+#         except Exception:
+#             return product_id, []
+
+#     tasks = [fetch_variations(p['id']) for p in products_data if p.get("type") == "variable"]
+#     if tasks:
+#         results = await asyncio.gather(*tasks)
+#         variations_map = dict(results)
+#         for p_data in products_data:
+#             if p_data.get("id") in variations_map:
+#                 p_data["variations"] = variations_map[p_data["id"]]
+
+#     # --- 4. Финальная сборка, обогащение "избранным" и валидация ---
+#     favorite_product_ids = {item.product_id for item in get_favorite_items(db, user_id=user_id)} if user_id else set()
+#     enriched_products = []
+    
+#     for p_data in products_data:
+#         # Финальная проверка наличия
+#         if p_data.get("type") == "variable" and not p_data.get("variations"):
+#             logger.info(f"Skipping variable product ID {p_data.get('id')} because it has no available variations left.")
+#             total_items -= 1
+#             continue
+        
+#         # --- ЛОГИКА ОБОГАЩЕНИЯ МИНИАТЮРАМИ ПОЛНОСТЬЮ УДАЛЕНА ---
+#         # Мы просто доверяем данным, которые пришли от WooCommerce в поле 'images'.
+        
+#         try:
+#             product_obj = Product.model_validate(p_data)
+#             product_obj.is_favorite = product_obj.id in favorite_product_ids
+#             enriched_products.append(product_obj)
+#         except Exception as e:
+#             logger.warning(f"Failed to validate product data for product ID {p_data.get('id')}", exc_info=True)
+#             total_items -= 1
+            
+#     paginated_result = PaginatedProducts(
+#         total_items=total_items,
+#         total_pages=math.ceil(total_items / size) if total_items > 0 else 1,
+#         current_page=page,
+#         size=size,
+#         items=enriched_products
+#     )
+    
+#     if not sku:
+#         await redis.set(cache_key, paginated_result.model_dump_json(), ex=CACHE_TTL_SECONDS)
+    
+#     return paginated_result
 
 async def get_product_by_id(
     db: Session,
