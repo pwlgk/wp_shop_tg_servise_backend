@@ -467,12 +467,10 @@ async def get_product_by_id(
     try:
         response = await wc_client.get(f"wc/v3/products/{product_id}")
         
-        # --- ИЗМЕНЕНИЕ: Обрабатываем 404, но не фильтруем по наличию ---
-        # Если WooCommerce вернул 404, значит товара в принципе не существует
+        # Явно обрабатываем 404, чтобы не вызывать исключение
         if response.status_code == 404:
             logger.warning(f"Product with ID {product_id} not found in WooCommerce (404).")
-            # Кешируем "пустой" результат, чтобы не запрашивать несуществующий товар снова
-            await redis.set(cache_key, "null", ex=CACHE_TTL_SECONDS)
+            await redis.set(cache_key, "null", ex=CACHE_TTL_SECONDS) # Кешируем "ненайденность"
             return None
 
         response.raise_for_status() # Вызовет ошибку для 5xx или других 4xx

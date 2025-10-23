@@ -187,22 +187,38 @@ async def get_user_favorites(
     page: int, 
     size: int
 ) -> PaginatedFavorites:
-    """Собирает пагинированный список избранных товаров."""
+    """Собирает пагинированный список избранных товаров с самоочисткой."""
     total_items = crud_cart.get_favorite_items_count(db, user_id=current_user.id)
     
     skip = (page - 1) * size
     favorite_items_db = crud_cart.get_favorite_items(db, user_id=current_user.id, skip=skip, limit=size)
     
     response_items = []
+    items_to_remove = [] # Список для "мертвых" записей
+
     for item in favorite_items_db:
         product_details = await catalog_service.get_product_by_id(
             db=db, redis=redis, product_id=item.product_id, user_id=current_user.id
         )
+        
+        # --- НАЧАЛО ИЗМЕНЕНИЯ: ЛОГИКА САМООЧИСТКИ ---
         if product_details:
+            # Если товар найден, добавляем его в ответ
             response_items.append(product_details)
+        else:
+            # Если товар не найден (вернулся None), помечаем его на удаление
+            logger.warning(f"Favorite item with product_id {item.product_id} for user {current_user.id} no longer exists. Marking for removal.")
+            items_to_remove.append(item.product_id)
+            total_items -= 1 # Корректируем общее количество
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+            
+    # Удаляем все "мертвые" записи из БД за один раз
+    if items_to_remove:
+        for product_id in items_to_remove:
+            crud_cart.remove_favorite_item(db, user_id=current_user.id, product_id=product_id)
             
     return PaginatedFavorites(
-        total_items=total_items,
+        total_items=total_items if total_items > 0 else 0,
         total_pages=math.ceil(total_items / size) if total_items > 0 else 1,
         current_page=page,
         size=size,
