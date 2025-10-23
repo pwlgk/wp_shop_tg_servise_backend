@@ -1,5 +1,6 @@
 # app/services/cart.py
 
+import asyncio
 import logging
 import math
 from typing import Optional
@@ -15,8 +16,10 @@ from app.services import coupon as coupon_service
 from app.schemas.cart import (
     CartResponse, CartItemResponse, CartStatusNotification
 )
-from app.schemas.product import PaginatedFavorites, ProductVariationSchema
+from app.schemas.product import PaginatedFavorites, ProductVariationSchema, Product
 from app.models.user import User
+from app.clients.woocommerce import wc_client
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -187,40 +190,105 @@ async def get_user_favorites(
     page: int, 
     size: int
 ) -> PaginatedFavorites:
-    """Собирает пагинированный список избранных товаров с самоочисткой."""
-    total_items = crud_cart.get_favorite_items_count(db, user_id=current_user.id)
+    """
+    Собирает пагинированный список избранных товаров, используя унифицированную
+    логику обогащения, аналогичную get_products.
+    """
     
+    # Шаг 1: Получаем пагинированный список ID избранных товаров из нашей БД
     skip = (page - 1) * size
     favorite_items_db = crud_cart.get_favorite_items(db, user_id=current_user.id, skip=skip, limit=size)
-    
-    response_items = []
-    items_to_remove = [] # Список для "мертвых" записей
+    total_items = crud_cart.get_favorite_items_count(db, user_id=current_user.id)
 
-    for item in favorite_items_db:
-        product_details = await catalog_service.get_product_by_id(
-            db=db, redis=redis, product_id=item.product_id, user_id=current_user.id
-        )
+    if not favorite_items_db:
+        return PaginatedFavorites(total_items=0, total_pages=0, current_page=page, size=size, items=[])
+
+    product_ids_to_fetch = [item.product_id for item in favorite_items_db]
+
+    # Шаг 2: Делаем ОДИН пакетный запрос к WooCommerce для получения данных всех товаров
+    try:
+        response = await wc_client.get("wc/v3/products", params={
+            "include": ",".join(map(str, product_ids_to_fetch)),
+            "per_page": size
+        })
+        response.raise_for_status()
+        products_data = response.json()
+    except Exception:
+        logger.error(f"Failed to fetch favorite products details for user {current_user.id}", exc_info=True)
+        return PaginatedFavorites(total_items=0, total_pages=0, current_page=page, size=size, items=[])
+
+    # --- Шаг 3: Применяем ту же самую логику обогащения, что и в get_products ---
+    
+    # 3.1 Обогащение вариациями
+    async def fetch_variations(product_id: int):
+        try:
+            var_response = await wc_client.get(f"wc/v3/products/{product_id}/variations", params={"per_page": 100, "status": "publish"})
+            var_response.raise_for_status()
+            return product_id, var_response.json()
+        except Exception:
+            return product_id, []
+
+    tasks = [fetch_variations(p['id']) for p in products_data if p.get("type") == "variable"]
+    if tasks:
+        results = await asyncio.gather(*tasks)
+        variations_map = dict(results)
+        for p_data in products_data:
+            if p_data.get("id") in variations_map:
+                p_data["variations"] = variations_map[p_data["id"]]
+
+    # 3.2 Обогащение миниатюрами
+    media_ids_to_fetch = set()
+    product_to_media_map = {}
+    for p_data in products_data:
+        media_id = p_data.get("featured_media") or (p_data.get("images")[0].get("id") if p_data.get("images") else 0)
+        if media_id:
+            media_ids_to_fetch.add(media_id)
+            product_to_media_map[p_data["id"]] = media_id
+    
+    media_urls_map = {}
+    if media_ids_to_fetch:
+        try:
+            media_url = f"{settings.WP_URL}/wp-json/wp/v2/media"
+            media_params = {"include": ",".join(map(str, list(media_ids_to_fetch))), "per_page": len(media_ids_to_fetch)}
+            media_response = await wc_client.async_client.get(media_url, params=media_params)
+            media_response.raise_for_status()
+            media_data = media_response.json()
+            for media_item in media_data:
+                sizes = media_item.get("media_details", {}).get("sizes", {})
+                optimal_image_url = (sizes.get("large") or {}).get("source_url") or \
+                                    (sizes.get("medium_large") or {}).get("source_url") or \
+                                    (sizes.get("medium") or {}).get("source_url") or \
+                                    (sizes.get("full") or {}).get("source_url") or \
+                                    media_item.get("source_url")
+                if optimal_image_url:
+                    media_urls_map[media_item["id"]] = optimal_image_url
+        except Exception:
+            logger.error("Failed to fetch featured media details for favorites", exc_info=True)
+
+    # --- Шаг 4: Финальная сборка ---
+    enriched_products = []
+    for p_data in products_data:
+        product_id = p_data.get("id")
+        media_id_for_product = product_to_media_map.get(product_id)
+        optimal_url = media_urls_map.get(media_id_for_product)
         
-        # --- НАЧАЛО ИЗМЕНЕНИЯ: ЛОГИКА САМООЧИСТКИ ---
-        if product_details:
-            # Если товар найден, добавляем его в ответ
-            response_items.append(product_details)
-        else:
-            # Если товар не найден (вернулся None), помечаем его на удаление
-            logger.warning(f"Favorite item with product_id {item.product_id} for user {current_user.id} no longer exists. Marking for removal.")
-            items_to_remove.append(item.product_id)
-            total_items -= 1 # Корректируем общее количество
-        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
-            
-    # Удаляем все "мертвые" записи из БД за один раз
-    if items_to_remove:
-        for product_id in items_to_remove:
-            crud_cart.remove_favorite_item(db, user_id=current_user.id, product_id=product_id)
+        if optimal_url:
+            p_data["images"] = [{"id": media_id_for_product or 0, "src": optimal_url, "alt": ""}]
+        elif not p_data.get("images"):
+            p_data["images"] = []
+        
+        try:
+            product_obj = Product.model_validate(p_data)
+            # Все товары в этом списке - избранные по определению
+            product_obj.is_favorite = True 
+            enriched_products.append(product_obj)
+        except Exception as e:
+            logger.warning(f"Failed to validate favorite product data for product ID {p_data.get('id')}", exc_info=True)
             
     return PaginatedFavorites(
-        total_items=total_items if total_items > 0 else 0,
+        total_items=total_items,
         total_pages=math.ceil(total_items / size) if total_items > 0 else 1,
         current_page=page,
         size=size,
-        items=response_items
+        items=enriched_products
     )
