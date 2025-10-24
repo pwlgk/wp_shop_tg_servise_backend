@@ -19,7 +19,10 @@ s3_client = boto3.client(
     endpoint_url=settings.S3_ENDPOINT_URL,
     aws_access_key_id=settings.S3_ACCESS_KEY,
     aws_secret_access_key=settings.S3_SECRET_KEY,
-    config=Config(signature_version='s3')
+    config=Config(
+        signature_version='s3v4',
+        s3={'addressing_style': 'path'} 
+    )
 )
 
 async def upload_file_to_s3(file: UploadFile, bucket_name: str) -> str:
