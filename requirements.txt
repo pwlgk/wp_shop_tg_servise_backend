@@ -36,7 +36,6 @@ magic-filter==1.0.12
 Mako==1.3.10
 MarkupSafe==3.0.2
 multidict==6.6.4
-mysqlclient==2.2.7
 packaging==25.0
 passlib==1.7.4
 pluggy==1.6.0
