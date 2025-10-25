@@ -3,13 +3,14 @@
 import logging
 import asyncio
 from sqlalchemy.orm import Session
+from datetime import datetime, timezone
 
 from app.db.session import SessionLocal
 from app.crud import loyalty as crud_loyalty
 from app.crud import notification as crud_notification
 from app.bot.services import notification as bot_notification_service
-from app.models.loyalty import LoyaltyTransaction
 from app.models.user import User
+from app.models.loyalty import LoyaltyTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -72,65 +73,81 @@ async def notify_about_expiring_points_task():
 async def expire_points_task():
     """
     Основная задача: находит и "сжигает" просроченные бонусные баллы,
-    используя FIFO-логику для корректного расчета и предотвращения отрицательного баланса.
+    используя строгую FIFO-логику для предотвращения отрицательного баланса.
     """
     logger.info("--- Starting scheduled job: Expire Loyalty Points ---")
     
     try:
-        users_to_process = []
+        users_to_process_ids = []
         with SessionLocal() as db:
             # 1. Находим всех пользователей, у которых в принципе могут быть просроченные баллы
             user_ids_tuples = crud_loyalty.get_users_with_potentially_expired_points(db)
-            users_to_process = [user_id for user_id, in user_ids_tuples]
+            users_to_process_ids = [user_id for user_id, in user_ids_tuples]
 
-        if not users_to_process:
+        if not users_to_process_ids:
             logger.info("No users with expired points found to process.")
             return
 
-        logger.info(f"Found {len(users_to_process)} users with potentially expired points to process.")
+        logger.info(f"Found {len(users_to_process_ids)} users with potentially expired points to process.")
 
         # 2. Для каждого пользователя рассчитываем точную сумму к списанию и выполняем операцию
-        for user_id in users_to_process:
+        for user_id in users_to_process_ids:
             with SessionLocal() as db:
                 try:
                     # 2.1. Рассчитываем, сколько баллов РЕАЛЬНО нужно списать
                     points_to_expire = crud_loyalty.calculate_points_to_expire_for_user(db, user_id)
+                    total_points_to_expire = int(points_to_expire)
 
-                    if points_to_expire <= 0:
+
+                    if total_points_to_expire <= 0:
                         # Если по итогу нечего списывать, просто "закрываем" старые транзакции
+                        logger.info(f"User {user_id}: No unspent points to expire.")
                         crud_loyalty.mark_positive_transactions_as_processed(db, user_id)
                         db.commit()
                         continue
                     
-                    logger.info(f"Calculated {points_to_expire} points to expire for user {user_id}.")
+                    # 5. Жесткая проверка: не можем списать больше, чем есть на балансе
+                    current_balance = crud_loyalty.get_user_balance(db, user_id)
+                    if total_points_to_expire > current_balance:
+                        logger.warning(
+                            f"User {user_id}: Calculation resulted in expiring {total_points_to_expire} points, "
+                            f"but balance is only {current_balance}. Expiring {current_balance} instead to prevent negative balance."
+                        )
+                        total_points_to_expire = current_balance
 
-                    # 2.2. Создаем одну компенсирующую транзакцию
+                    if total_points_to_expire <= 0:
+                         logger.info(f"User {user_id}: After final check, nothing to expire.")
+                         crud_loyalty.mark_positive_transactions_as_processed(db, user_id)
+                         db.commit()
+                         continue
+
+                    logger.info(f"User {user_id}: Calculated {total_points_to_expire} points to expire.")
+
+                    # 6. Создаем транзакцию списания
                     crud_loyalty.create_transaction(
-                        db=db,
-                        user_id=user_id,
-                        points=-points_to_expire,
-                        type="expired",
-                        order_id_wc=None
+                        db=db, user_id=user_id, points=-total_points_to_expire, type="expired"
                     )
                     
-                    # 2.3. "Закрываем" старые положительные транзакции, чтобы они больше не учитывались
+                    # 7. "Закрываем" старые транзакции
                     crud_loyalty.mark_positive_transactions_as_processed(db, user_id)
                     
-                    db.commit() # Коммитим списание и обновление старых транзакций
+                    db.commit()
 
-                    # 2.4. Отправляем уведомления
+                    # 8. Отправляем уведомления
                     user = db.query(User).filter(User.id == user_id).first()
                     if user and user.bot_accessible:
                         await bot_notification_service.send_points_expired_notification(
-                            db, user, int(points_to_expire)
+                            db, user, total_points_to_expire
                         )
                         crud_notification.create_notification(
-                            db=db, user_id=user.id, type="points_expired",
+                            db=db,
+                            user_id=user.id,
+                            type="points_expired",
                             title="Бонусные баллы сгорели",
-                            message=f"С вашего счета списано {int(points_to_expire)} баллов по истечению срока их действия."
+                            message=f"С вашего счета списано {total_points_to_expire} баллов по истечению срока их действия."
                         )
-                        db.commit() # Коммитим создание уведомления
-                        await asyncio.sleep(0.1) # Пауза
+                        db.commit()
+                        await asyncio.sleep(0.1)
 
                 except Exception as e:
                     logger.error(f"Failed to process points expiration for user {user_id}", exc_info=True)
