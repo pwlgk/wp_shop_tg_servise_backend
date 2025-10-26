@@ -126,9 +126,10 @@ async def create_order_from_cart(
 
     # --- Шаг 5: Фаза 2 - Создание заказа и Подтверждение/Отмена ---
     try:
-        customer_data_response = await wc_client.get(f"wc/v3/customers/{current_user.wordpress_id}")
-        customer_data_response.raise_for_status()
-        customer_data = customer_data_response.json()
+        # --- ИЗМЕНЕНИЕ: get() возвращает Response, обрабатываем его ---
+        customer_response = await wc_client.get(f"wc/v3/customers/{current_user.wordpress_id}")
+        customer_response.raise_for_status()
+        customer_data = customer_response.json()
         
         order_payload = {
             "customer_id": current_user.wordpress_id, "line_items": line_items_for_wc,
@@ -137,11 +138,9 @@ async def create_order_from_cart(
             "points_to_spend": order_data.points_to_spend, "coupon_code": order_data.coupon_code
         }
         
-        response = await wc_client.post("headless-api/v1/orders", json=order_payload)
-        if response.status_code != status.HTTP_201_CREATED:
-            raise HTTPException(status_code=response.status_code, detail=response.json().get("message", "Магазин не смог создать заказ."))
-
-        created_order_data = response.json()
+        # --- ИЗМЕНЕНИЕ: post() возвращает dict или падает с ошибкой ---
+        # Оборачиваем вызов в try/except
+        created_order_data = await wc_client.post("headless-api/v1/orders", json=order_payload)
         new_order_id = created_order_data['id']
 
         # Сценарий Успеха: Подтверждаем списание
@@ -156,31 +155,34 @@ async def create_order_from_cart(
         with get_db_context() as session:
             crud_cart.clear_cart(session, user_id=current_user.id)
 
-    except Exception as e:
-        # Сценарий Неудачи: Отменяем резервирование
+    except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        # Сценарий Неудачи: Ловим ошибку от wc_client и отменяем резервирование
         logger.error(f"Order creation failed for user {current_user.id} after points were reserved. Refunding.", exc_info=True)
         if pending_transaction:
             with get_db_context() as session:
                 tx_to_cancel = session.get(LoyaltyTransaction, pending_transaction.id)
-                # Проверяем, что мы еще не отменили этот резерв
                 if tx_to_cancel and tx_to_cancel.type == 'order_pending_spend':
-                    # Создаем компенсирующую транзакцию
                     crud_loyalty.create_transaction(
                         session, user_id=current_user.id, points=abs(tx_to_cancel.points),
                         type="spend_refund", related_transaction_id=tx_to_cancel.id
                     )
-                    # Меняем тип "подвисшей" транзакции, чтобы она не была обработана чистильщиком
                     tx_to_cancel.type = "order_spend_failed"
                     session.commit()
         
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Не удалось создать заказ. Если вы списывали баллы, они были возвращены на ваш счет.")
+        # Возвращаем ошибку клиенту
+        detail_message = "Не удалось создать заказ в магазине. Если вы списывали баллы, они были возвращены на ваш счет."
+        if isinstance(e, httpx.HTTPStatusError) and e.response.status_code < 500:
+            try:
+                # Пытаемся достать более конкретное сообщение об ошибке от WP
+                detail_message = e.response.json().get("message", detail_message)
+            except Exception:
+                pass
+
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail_message)
     
-    # --- Шаг 6: Уведомления и возврат результата ---
+    # --- Шаг 6: Уведомления и возврат результата (без изменений) ---
     validated_order = Order.model_validate(created_order_data)
     
-    # Запускаем уведомления в фоне, чтобы не задерживать ответ пользователю
     try:
         asyncio.create_task(notification_service.send_new_order_confirmation(db, current_user, validated_order))
         asyncio.create_task(notification_service.send_new_order_to_admin(validated_order, current_user))
