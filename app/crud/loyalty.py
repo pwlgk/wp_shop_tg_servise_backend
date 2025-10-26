@@ -101,3 +101,11 @@ def mark_positive_transactions_as_processed(db: Session, user_id: int):
         LoyaltyTransaction.expires_at.isnot(None),
         LoyaltyTransaction.expires_at < datetime.now(timezone.utc)
     ).update({"expires_at": None}, synchronize_session=False)
+
+
+def find_pending_spend(db: Session, user_id: int) -> LoyaltyTransaction | None:
+    """Находит самую последнюю 'резервную' транзакцию для пользователя."""
+    return db.query(LoyaltyTransaction).filter_by(
+        user_id=user_id,
+        type='order_pending_spend'
+    ).order_by(LoyaltyTransaction.id.desc()).first()

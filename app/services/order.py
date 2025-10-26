@@ -36,64 +36,50 @@ async def create_order_from_cart(
     order_data: OrderCreate
 ) -> Order:
     """
-    Создает заказ в WooCommerce на основе корзины пользователя.
-    Выполняет все проверки: наличие (включая вариации), баланс баллов, % списания, мин. сумма.
+    Создает заказ в WooCommerce, используя надежный двухфазный механизм ("Сага")
+    для списания бонусных баллов.
     """
-    # 1. Получаем настройки магазина и содержимое корзины
+    # --- Шаг 1: Получение настроек и содержимого корзины ---
     shop_settings = await settings_service.get_shop_settings(redis)
     cart_items_db = crud_cart.get_cart_items(db, user_id=current_user.id)
 
     if not cart_items_db:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Корзина пуста.")
 
-    # 2. ФИНАЛЬНАЯ ПРОВЕРКА НАЛИЧИЯ и расчет "чистой" стоимости товаров
+    # --- Шаг 2: Финальная проверка наличия и расчет стоимости ---
     line_items_for_wc = []
     unavailable_items = []
     total_items_price = 0.0
 
     for item in cart_items_db:
-        # Инвалидируем кеш
-        await redis.delete(f"product:{item.product_id}:user:{current_user.id}")
-        await redis.delete(f"product:{item.product_id}")
-
-        product_details = await catalog_service.get_product_by_id(
-            db=db,
-            redis=redis,
-            product_id=item.product_id,
-            user_id=current_user.id
-        )
+        product_details = await catalog_service.get_product_by_id(db, redis, item.product_id, user_id=current_user.id)
 
         if not product_details:
             unavailable_items.append(f"ID {item.product_id} (товар удален)")
             continue
-
+        
+        # Логика проверки для вариаций и простых товаров
         item_price_str: str
         item_stock_quantity: int | None
-        item_stock_status: str
 
         if item.variation_id:
-            # Сценарий 1: Вариативный товар
             if not product_details.variations:
                 unavailable_items.append(f"'{product_details.name}' (опции изменились)")
                 continue
-
             selected_variation = next((v for v in product_details.variations if v.id == item.variation_id), None)
             if not selected_variation or selected_variation.stock_status != 'instock':
                 unavailable_items.append(f"'{product_details.name}' (выбранная опция закончилась)")
                 continue
-            
             item_price_str = selected_variation.price
             item_stock_quantity = selected_variation.stock_quantity
             line_items_for_wc.append({"variation_id": item.variation_id, "quantity": item.quantity})
         else:
-            # Сценарий 2: Простой товар
             if product_details.variations:
                 unavailable_items.append(f"'{product_details.name}' (не выбрана опция)")
                 continue
             if product_details.stock_status != 'instock':
                 unavailable_items.append(f"'{product_details.name}'")
                 continue
-
             item_price_str = product_details.price
             item_stock_quantity = product_details.stock_quantity
             line_items_for_wc.append({"product_id": item.product_id, "quantity": item.quantity})
@@ -102,98 +88,104 @@ async def create_order_from_cart(
             unavailable_items.append(f"'{product_details.name}' (в наличии: {item_stock_quantity} шт.)")
             continue
         
-        # --- НАЧАЛО ИСПРАВЛЕНИЯ ЗДЕСЬ ---
-        # Добавляем такую же безопасную проверку цены, как в get_user_cart
         try:
-            current_item_price = float(item_price_str)
+            total_items_price += float(item_price_str) * item.quantity
         except (ValueError, TypeError):
-            logger.warning(
-                f"[Create Order] Could not convert price '{item_price_str}' for product ID {item.product_id} "
-                f"(variation ID: {item.variation_id}). Treating as 0."
-            )
-            current_item_price = 0.0
-        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-        
-        total_items_price += current_item_price * item.quantity
+            unavailable_items.append(f"'{product_details.name}' (некорректная цена)")
 
     if unavailable_items:
         error_detail = "Некоторые товары закончились или их количество изменилось: " + ", ".join(unavailable_items)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error_detail)
 
-    # 3. ПРОВЕРКА УСЛОВИЙ ОПЛАТЫ И ЗАКАЗА (этот блок остается без изменений)
+    # --- Шаг 3: Проверка бизнес-правил (мин. сумма, % списания) ---
     if total_items_price < shop_settings.min_order_amount:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Минимальная сумма заказа - {shop_settings.min_order_amount} руб."
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Минимальная сумма заказа - {shop_settings.min_order_amount} руб.")
 
     if order_data.points_to_spend > 0:
-        # ... (проверка максимального процента и баланса баллов)
         max_points_to_spend = total_items_price * (shop_settings.max_points_payment_percentage / 100)
         if order_data.points_to_spend > max_points_to_spend:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Бонусами можно оплатить не более {int(max_points_to_spend)} ({shop_settings.max_points_payment_percentage}%) от стоимости товаров."
-            )
-        
-        current_balance = loyalty_service.get_user_balance(db, current_user)
-        if order_data.points_to_spend > current_balance:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недостаточно бонусных баллов для списания.")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Бонусами можно оплатить не более {int(max_points_to_spend)} ({shop_settings.max_points_payment_percentage}%) от стоимости товаров.")
 
-    # 4. ОСНОВНАЯ ТРАНЗАКЦИЯ (этот блок остается без изменений)
-    db.begin_nested()
+    # --- Шаг 4: Фаза 1 - Резервирование баллов ---
+    pending_transaction: LoyaltyTransaction | None = None
+    if order_data.points_to_spend > 0:
+        try:
+            with db.begin_nested():
+                pending_transaction = loyalty_service.spend_points(
+                    db, user=current_user, points_to_spend=order_data.points_to_spend,
+                    order_id_wc=None, is_pending=True
+                )
+            db.commit()
+        except HTTPException as e:
+            db.rollback()
+            raise e
+        except Exception:
+            db.rollback()
+            logger.error(f"Failed to create pending spend transaction for user {current_user.id}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Ошибка при резервировании баллов.")
+
+    # --- Шаг 5: Фаза 2 - Создание заказа и Подтверждение/Отмена ---
     try:
-        # Шаг 4.1: Атомарно списываем баллы
-        if order_data.points_to_spend > 0:
-            loyalty_service.spend_points(
-                db, user=current_user,
-                points_to_spend=order_data.points_to_spend,
-                order_id_wc=0 # Временный ID
-            )
-
-        # Шаг 4.2: Формируем и отправляем заказ в WordPress
         customer_data_response = await wc_client.get(f"wc/v3/customers/{current_user.wordpress_id}")
+        customer_data_response.raise_for_status()
         customer_data = customer_data_response.json()
         
         order_payload = {
-            "customer_id": current_user.wordpress_id,
-            "line_items": line_items_for_wc, # <-- Теперь здесь корректный список
-            "billing": customer_data.get("billing"),
-            "shipping": customer_data.get("shipping"),
+            "customer_id": current_user.wordpress_id, "line_items": line_items_for_wc,
+            "billing": customer_data.get("billing"), "shipping": customer_data.get("shipping"),
             "payment_method_id": order_data.payment_method_id,
-            "points_to_spend": order_data.points_to_spend,
-            "coupon_code": order_data.coupon_code
+            "points_to_spend": order_data.points_to_spend, "coupon_code": order_data.coupon_code
         }
         
-        created_order_data = await wc_client.post("headless-api/v1/orders", json=order_payload)
+        response = await wc_client.post("headless-api/v1/orders", json=order_payload)
+        if response.status_code != status.HTTP_201_CREATED:
+            raise HTTPException(status_code=response.status_code, detail=response.json().get("message", "Магазин не смог создать заказ."))
+
+        created_order_data = response.json()
         new_order_id = created_order_data['id']
 
-        # Шаг 4.3: Обновляем транзакцию списания реальным ID заказа
-        if order_data.points_to_spend > 0:
-            transaction_to_update = db.query(LoyaltyTransaction).filter_by(
-                user_id=current_user.id, order_id_wc=0, type="order_spend"
-            ).order_by(LoyaltyTransaction.id.desc()).first()
-            if transaction_to_update:
-                transaction_to_update.order_id_wc = new_order_id
-
-        # Шаг 4.4: Очищаем корзину
-        crud_cart.clear_cart(db, user_id=current_user.id)
-
-        # Шаг 4.5: Коммитим транзакцию
-        db.commit()
+        # Сценарий Успеха: Подтверждаем списание
+        if pending_transaction:
+            with get_db_context() as session:
+                tx_to_confirm = session.get(LoyaltyTransaction, pending_transaction.id)
+                if tx_to_confirm and tx_to_confirm.type == 'order_pending_spend':
+                    tx_to_confirm.type = "order_spend"
+                    tx_to_confirm.order_id_wc = new_order_id
+                    session.commit()
+        
+        with get_db_context() as session:
+            crud_cart.clear_cart(session, user_id=current_user.id)
 
     except Exception as e:
-        db.rollback()
-        logger.error(f"Transaction rolled back. Error creating order for user {current_user.id}", exc_info=True)
+        # Сценарий Неудачи: Отменяем резервирование
+        logger.error(f"Order creation failed for user {current_user.id} after points were reserved. Refunding.", exc_info=True)
+        if pending_transaction:
+            with get_db_context() as session:
+                tx_to_cancel = session.get(LoyaltyTransaction, pending_transaction.id)
+                # Проверяем, что мы еще не отменили этот резерв
+                if tx_to_cancel and tx_to_cancel.type == 'order_pending_spend':
+                    # Создаем компенсирующую транзакцию
+                    crud_loyalty.create_transaction(
+                        session, user_id=current_user.id, points=abs(tx_to_cancel.points),
+                        type="spend_refund", related_transaction_id=tx_to_cancel.id
+                    )
+                    # Меняем тип "подвисшей" транзакции, чтобы она не была обработана чистильщиком
+                    tx_to_cancel.type = "order_spend_failed"
+                    session.commit()
+        
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Не удалось создать заказ.")
-
-    # 5. Валидация ответа и отправка уведомлений (этот блок остается без изменений)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Не удалось создать заказ. Если вы списывали баллы, они были возвращены на ваш счет.")
+    
+    # --- Шаг 6: Уведомления и возврат результата ---
     validated_order = Order.model_validate(created_order_data)
     
-    await notification_service.send_new_order_confirmation(db, current_user, validated_order)
-    await notification_service.send_new_order_to_admin(validated_order, current_user)
+    # Запускаем уведомления в фоне, чтобы не задерживать ответ пользователю
+    try:
+        asyncio.create_task(notification_service.send_new_order_confirmation(db, current_user, validated_order))
+        asyncio.create_task(notification_service.send_new_order_to_admin(validated_order, current_user))
+    except Exception as e:
+        logger.error(f"Failed to dispatch order notifications for order {validated_order.id}", exc_info=True)
 
     return validated_order
 

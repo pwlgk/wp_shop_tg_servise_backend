@@ -26,6 +26,7 @@ from app.bot.core import bot, dp
 from app.bot.handlers.user import user_router
 from app.bot.handlers.admin_dialogs import admin_dialog_router
 from app.bot.handlers.admin_actions import admin_actions_router
+from app.services.spend_cleanup import cleanup_pending_spends_task
 from app.services.user_updater import update_all_usernames_task
 # Фоновые задачи и сервисы
 from app.services.user_levels import update_all_user_levels
@@ -102,6 +103,7 @@ async def lifespan(app: FastAPI):
             scheduler.add_job(update_all_usernames_task, 'cron', day_of_week='sun', hour=6, timezone='Europe/Moscow')
             scheduler.add_job(activate_new_users_task, 'cron', hour=11, minute=0, timezone='Europe/Moscow')
             scheduler.add_job(reactivate_sleeping_users_task, 'cron', hour=12, minute=0, timezone='Europe/Moscow')
+            scheduler.add_job(cleanup_pending_spends_task, 'cron', hour='*')
             scheduler.start()
             logger.info("Scheduler started with background jobs.")
     else:
