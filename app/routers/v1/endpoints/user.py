@@ -37,7 +37,6 @@ async def update_users_me(
     """
     Обновление информации о текущем авторизованном пользователе.
     """
-    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
     # Передаем все три необходимых аргумента
     return await user_service.update_user_profile(db, current_user, user_update_data)
 

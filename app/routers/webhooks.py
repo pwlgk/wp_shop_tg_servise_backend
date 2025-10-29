@@ -209,7 +209,7 @@ async def order_updated_webhook(
     except json.JSONDecodeError:
         return {"status": "ok", "message": "Invalid JSON payload."}
         
-    logger.info(f"--- Order Updated Webhook Received ---\nBody:\n{json.dumps(order_data, indent=2)}\n------------------------------------")
+    # logger.info(f"--- Order Updated Webhook Received ---\nBody:\n{json.dumps(order_data, indent=2)}\n------------------------------------")
 
     order_id = order_data.get("id")
     order_status = order_data.get("status")
