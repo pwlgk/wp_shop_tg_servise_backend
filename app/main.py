@@ -17,7 +17,6 @@ from app.core.redis import redis_client
 
 # Роутеры FastAPI
 from app.routers.v1.api import api_router as api_v1_router
-from app.routers.v2.api import api_router as api_v2_router
 
 from app.routers.webhooks import wc_router, telegram_router
 
@@ -159,7 +158,6 @@ api_router = APIRouter(prefix="/api")
 
 # Пользовательские и публичные эндпоинты
 api_router.include_router(api_v1_router)
-api_router.include_router(api_v2_router)
 
 # Подключаем главный роутер к приложению
 app.include_router(api_router)
