@@ -113,6 +113,7 @@ def _filter_empty_category_branches(categories: List[ProductCategory]) -> List[P
     return valid_branches
 
 
+
 async def get_products(
     db: Session,
     redis: Redis,
@@ -130,15 +131,14 @@ async def get_products(
     featured: Optional[bool] = None
 ) -> PaginatedProducts:
     """
-    Получает пагинированный список товаров со всеми обогащениями.
-    Реализует "умную" фильтрацию:
+    Получает пагинированный список товаров.
     - При общем запросе скрывает товары из скрытых категорий.
-    - При прямом запросе по ID категории отдает товары всегда.
+    - При поиске или запросе конкретной категории показывает все.
     """
     
     # --- 1. Формирование ключа кеша ---
     cache_key_parts = [
-        "products_v12", f"page:{page}", f"size:{size}", # v12 для инвалидации
+        "products_v14", f"page:{page}", f"size:{size}", # v14 для инвалидации
         f"sku:{sku}" if sku else "", f"cat:{category}" if category else "",
         f"tag:{tag}" if tag else "", f"search:{search}" if search else "",
         f"minp:{min_price}" if min_price else "", f"maxp:{max_price}" if max_price else "",
@@ -178,26 +178,10 @@ async def get_products(
             total_items = len(products_data)
             total_pages = 1 if total_items > 0 else 0
         else:
-            # --- НАЧАЛО НОВОЙ ЛОГИКИ ФИЛЬТРАЦИИ ПО "БЕЛОМУ СПИСКУ" ---
+            # --- НАЧАЛО ФИНАЛЬНОЙ ЛОГИКИ ФИЛЬТРАЦИИ ---
             params = {"page": page, "per_page": size, "status": "publish", "stock_status": "instock"}
             
-            if category:
-                # Если пользователь запросил КОНКРЕТНУЮ категорию, мы ее отдаем всегда.
-                # Логика скрытия здесь не применяется.
-                logger.info(f"Fetching products for a specific category ID: {category}")
-                params["category"] = str(category)
-            else:
-                # Если это ОБЩИЙ запрос (без фильтра по категории), применяем "белый список".
-                logger.info("Fetching general product list. Applying 'allowed categories' filter.")
-                allowed_category_ids = await get_allowed_parent_category_ids(redis)
-                if allowed_category_ids:
-                    params['category'] = ",".join(allowed_category_ids)
-                else:
-                    logger.warning("All parent categories are hidden or something went wrong. Returning empty product list.")
-                    return PaginatedProducts(total_items=0, total_pages=0, current_page=page, size=size, items=[])
-            # --- КОНЕЦ НОВОЙ ЛОГИКИ ФИЛЬТРАЦИИ ---
-
-            # Добавляем остальные параметры
+            # Собираем все остальные параметры фильтрации
             if tag: params["tag"] = str(tag)
             if search: params["search"] = search
             if min_price is not None: params["min_price"] = str(min_price)
@@ -205,7 +189,27 @@ async def get_products(
             if orderby in ["date", "id", "title", "price", "popularity", "rating"]: params["orderby"] = orderby
             if order in ["asc", "desc"]: params["order"] = order
             if featured: params["featured"] = featured
-            
+
+            # Применяем логику фильтрации категорий только в нужном случае
+            if category:
+                # Если пользователь запросил КОНКРЕТНУЮ категорию, используем только ее.
+                logger.info(f"Fetching products for a specific category ID: {category}")
+                params["category"] = str(category)
+            elif search:
+                # Если пользователь использует ПОИСК, ищем по всем категориям.
+                logger.info(f"Performing search for '{search}' across all categories.")
+                # Ничего не добавляем в params['category']
+            else:
+                # Во всех остальных случаях (просто просмотр каталога) применяем "белый список".
+                logger.info("Fetching general product list. Applying 'allowed categories' filter.")
+                allowed_category_ids = await get_allowed_parent_category_ids(redis)
+                if allowed_category_ids:
+                    params['category'] = ",".join(allowed_category_ids)
+                else:
+                    logger.warning("All parent categories are hidden or something went wrong. Returning empty product list.")
+                    return PaginatedProducts(total_items=0, total_pages=0, current_page=page, size=size, items=[])
+            # --- КОНЕЦ ФИНАЛЬНОЙ ЛОГИКИ ФИЛЬТРАЦИИ ---
+
             logger.info(f"Fetching products from WC with params: {params}")
             response = await wc_client.get("wc/v3/products", params=params)
             response.raise_for_status()
