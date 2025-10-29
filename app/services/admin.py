@@ -2,8 +2,11 @@
 
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 from bs4 import BeautifulSoup
+import httpx
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 from app.core.redis import redis_client
@@ -14,50 +17,94 @@ from app.clients.woocommerce import wc_client
 from app.dependencies import get_db_context
 from app.models.user import User
 from app.schemas.admin import (
-    AdminOrderListItem, AdminPromoListItem, AdminUserListItem, PaginatedAdminOrders, PaginatedAdminPromos, PaginatedAdminUsers, AdminUserDetails
+    AdminDashboardStats, AdminOrderCustomerInfo, AdminOrderDetails, AdminOrderListItem, AdminPromoListItem, AdminUserListItem, PaginatedAdminOrders, PaginatedAdminPromos, PaginatedAdminUsers, AdminUserDetails
 )
+from app.services import catalog as catalog_service
 from app.schemas.cms import Banner
 from app.services import settings as settings_service
 
 from app.schemas.order import Order
 from app.schemas.loyalty import LoyaltyTransaction
+from app.models.loyalty import LoyaltyTransaction as LoyaltyTransactionModel
 from app.schemas.product import PaginatedOrders, PaginatedResponse
 from app.bot.utils.user_display import get_display_name
 from app.bot.services import notification as bot_notification_service
-from app.schemas.settings import ShopSettings
+from app.schemas.settings import ShopSettings, ShopSettingsUpdate
 from app.services.cms import extract_image_url_from_html
 
 logger = logging.getLogger(__name__)
 
 
-async def get_dashboard_stats(db: Session):
-    """Собирает статистику для админской приборной панели."""
-    new_users_today = crud_user.count_new_users_today(db)
-    total_users = crud_user.count_all_users(db)
+async def get_dashboard_stats(db: Session, period: str = "day") -> AdminDashboardStats:
+    """Собирает расширенную статистику для админской приборной панели за выбранный период."""
+    
+    # 1. Определяем временной интервал
+    now = datetime.now(timezone.utc)
+    if period == "week":
+        start_date = now - timedelta(days=now.weekday())
+    elif period == "month":
+        start_date = now.replace(day=1)
+    else: # "day"
+        start_date = now
+    
+    date_min = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    cache_key = f"dashboard_stats:{period}:{date_min.strftime('%Y-%m-%d')}"
+    cached_data = await redis_client.get(cache_key)
+    if cached_data:
+        logger.info(f"Serving dashboard stats for period '{period}' from cache.")
+        return AdminDashboardStats.model_validate_json(cached_data)
 
+    logger.info(f"Calculating fresh dashboard stats for period '{period}'.")
+    
+    # 2. Получаем финансовые метрики из WooCommerce
+    revenue = 0.0
+    order_count = 0
+    items_sold = 0
     try:
-        on_hold_orders_resp = await wc_client.get("wc/v3/orders", params={"status": "on-hold"})
-        new_orders_count = int(on_hold_orders_resp.headers.get("X-WP-Total", 0))
-
-        processing_orders_resp = await wc_client.get("wc/v3/orders", params={"status": "processing"})
-        processing_orders_count = int(processing_orders_resp.headers.get("X-WP-Total", 0))
-        
-        today_start = datetime.utcnow().strftime('%Y-%m-%d')
-        reports_resp = await wc_client.get("wc/v3/reports/sales", params={"date_min": today_start})
-        sales_today_data = reports_resp.json()
-        sales_today = float(sales_today_data[0].get("total_sales", 0.0)) if sales_today_data else 0.0
-
+        reports_resp = await wc_client.get(
+            "wc/v3/reports/sales",
+            params={"date_min": date_min.strftime('%Y-%m-%d')}
+        )
+        sales_data = reports_resp.json()
+        if sales_data:
+            report = sales_data[0]
+            revenue = float(report.get("total_sales", 0.0))
+            order_count = int(report.get("total_orders", 0))
+            items_sold = int(report.get("total_items", 0))
     except Exception:
-        logger.error("Failed to fetch WooCommerce stats for admin dashboard", exc_info=True)
-        new_orders_count = processing_orders_count = sales_today = 0
+        logger.error(f"Failed to fetch WooCommerce sales report for period '{period}'", exc_info=True)
 
-    return {
-        "new_orders_count": new_orders_count,
-        "processing_orders_count": processing_orders_count,
-        "new_users_today_count": new_users_today,
-        "total_users_count": total_users,
-        "sales_today": sales_today,
-    }
+    # 3. Получаем метрики из локальной БД
+    new_users = db.query(func.count(User.id)).filter(User.created_at >= date_min).scalar()
+    
+    points_earned = db.query(func.sum(LoyaltyTransactionModel.points)).filter(
+        LoyaltyTransactionModel.created_at >= date_min,
+        LoyaltyTransactionModel.points > 0
+    ).scalar() or 0
+    
+    points_spent = abs(db.query(func.sum(LoyaltyTransactionModel.points)).filter(
+        LoyaltyTransactionModel.created_at >= date_min,
+        LoyaltyTransactionModel.points < 0,
+        LoyaltyTransactionModel.type == "order_spend"
+    ).scalar() or 0)
+
+    # 4. Собираем и кешируем результат
+    stats_data = AdminDashboardStats(
+        period=period,
+        revenue=revenue,
+        avg_order_value=revenue / order_count if order_count > 0 else 0.0,
+        order_count=order_count,
+        items_sold=items_sold,
+        new_users=new_users,
+        loyalty_points_earned=int(points_earned),
+        loyalty_points_spent=int(points_spent)
+    )
+    
+    # Кешируем на 1 час, используя определенный ранее ключ
+    await redis_client.set(cache_key, stats_data.model_dump_json(), ex=3600)
+    
+    return stats_data
 
 
 async def get_paginated_users(db: Session, page: int, size: int, **filters) -> PaginatedAdminUsers:
@@ -150,17 +197,26 @@ async def get_user_details(
     )
     return user_details
 
-async def get_paginated_orders(db: Session, page: int, size: int, **filters) -> PaginatedOrders:
-# -------------------------
+async def get_paginated_orders(db: Session, page: int, size: int, **filters) -> PaginatedAdminOrders:
     """
     Собирает пагинированный и УПРОЩЕННЫЙ список всех заказов для админки.
+    Корректно определяет имя клиента, даже если он не синхронизирован с локальной БД.
     """
-    params = { "page": page, "per_page": size }
-    if filters.get("status"): params["status"] = filters["status"]
-    if filters.get("search"): params["search"] = filters["search"]
+    params = {"page": page, "per_page": size}
+    
+    # Добавляем фильтры в запрос
+    if filters.get("status"):
+        params["status"] = filters["status"]
+    else:
+        # ВАЖНО: Если фильтр по статусу не задан, исключаем черновики по умолчанию
+        params["status"] = "pending,processing,on-hold,completed,cancelled,refunded,failed"
+        
+    if filters.get("search"):
+        params["search"] = filters["search"]
 
     try:
         response = await wc_client.get("wc/v3/orders", params=params)
+        # wc_client уже вызовет raise_for_status в случае ошибки
         
         total_items = int(response.headers.get("X-WP-Total", 0))
         total_pages = int(response.headers.get("X-WP-TotalPages", 0))
@@ -172,18 +228,37 @@ async def get_paginated_orders(db: Session, page: int, size: int, **filters) -> 
             customer_display_name = "Гость"
             customer_telegram_id = None
             
-            if customer_id:
-                # --- ИЗМЕНЕНИЕ ЗДЕСЬ: используем переданный `db` ---
+            if customer_id and customer_id > 0:
+                # Сначала ищем пользователя в нашей быстрой локальной БД
                 user = crud_user.get_user_by_wordpress_id(db, customer_id)
                 if user:
+                    # Если нашли, собираем имя из данных нашей БД (это быстрее и надежнее)
                     customer_telegram_id = user.telegram_id
-                    customer_display_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.username or f"ID {user.telegram_id}"
+                    display_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+                    customer_display_name = display_name or user.username or f"ID {user.telegram_id}"
+                else:
+                    # Если не нашли в локальной БД, берем имя из биллинга заказа
+                    billing_info = order_dict.get("billing", {})
+                    display_name_from_billing = f"{billing_info.get('first_name', '')} {billing_info.get('last_name', '')}".strip()
+                    
+                    if display_name_from_billing:
+                        customer_display_name = display_name_from_billing
+                    else:
+                        # Если даже в биллинге пусто, отображаем ID из WP
+                        customer_display_name = f"Пользователь (WP ID: {customer_id})"
+            else:
+                # Обработка гостевого заказа (customer_id = 0)
+                billing_info = order_dict.get("billing", {})
+                guest_name = f"{billing_info.get('first_name', '')} {billing_info.get('last_name', '')}".strip()
+                customer_display_name = f"Гость ({guest_name})" if guest_name else "Гость"
+
 
             # Формируем краткую сводку по товарам
             line_items = order_dict.get("line_items", [])
             items_summary_parts = [f"{item['name']} (x{item['quantity']})" for item in line_items]
             items_summary = ", ".join(items_summary_parts)
-            # Обрезаем, если слишком длинная
+            
+            # Обрезаем, если строка слишком длинная
             if len(items_summary) > 70:
                 items_summary = items_summary[:67] + "..."
 
@@ -202,8 +277,12 @@ async def get_paginated_orders(db: Session, page: int, size: int, **filters) -> 
             total_items=total_items, total_pages=total_pages,
             current_page=page, size=size, items=items
         )
+    except httpx.HTTPStatusError as e:
+        logger.error("WooCommerce API error while fetching paginated orders.", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"WooCommerce API error: {e.response.text}")
     except Exception as e:
-        logger.error("Failed to fetch orders for admin panel", exc_info=True)
+        logger.error("Failed to fetch paginated orders for admin panel", exc_info=True)
+        # Возвращаем пустой список в случае непредвиденной ошибки, чтобы не ломать фронтенд
         return PaginatedAdminOrders(total_items=0, total_pages=0, current_page=page, size=size, items=[])
     
 async def get_current_shop_settings() -> ShopSettings:
@@ -260,3 +339,138 @@ async def get_paginated_promos(page: int, size: int) -> PaginatedAdminPromos:
     except Exception as e:
         logger.error("Failed to fetch promos for admin panel", exc_info=True)
         return PaginatedAdminPromos(total_items=0, total_pages=0, current_page=page, size=size, items=[])
+
+
+async def update_shop_settings(settings_data: ShopSettingsUpdate) -> ShopSettings:
+    """
+    Обновляет настройки магазина в WordPress и сбрасывает кеш.
+    """
+    # Преобразуем Pydantic модель в словарь, исключая поля, которые не были переданы (None)
+    update_payload = settings_data.model_dump(exclude_unset=True)
+
+    if not update_payload:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No settings data provided to update."
+        )
+
+    try:
+        # Отправляем запрос на наш кастомный эндпоинт в WordPress
+        await wc_client.post("headless-api/v1/settings", json=update_payload)
+        logger.info(f"Successfully sent update request to WordPress for settings: {list(update_payload.keys())}")
+    except Exception as e:
+        logger.error("Failed to update shop settings in WordPress.", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not update settings in WordPress."
+        )
+
+    # КРИТИЧЕСКИ ВАЖНЫЙ ШАГ: принудительно очищаем кеш настроек
+    await redis_client.delete("shop_settings")
+    logger.info("Shop settings cache has been invalidated.")
+
+    # Запрашиваем и возвращаем свежие настройки, чтобы фронтенд сразу увидел изменения
+    return await settings_service.get_shop_settings(redis_client)
+
+async def get_order_details(db: Session, order_id: int) -> Optional[AdminOrderDetails]:
+    """
+    Получает детальную информацию о заказе из WooCommerce, обогащает ее
+    данными о пользователе, изображениями товаров и заметками к заказу.
+    """
+    try:
+        # 1. Получаем основные данные о заказе из WooCommerce
+        order_response = await wc_client.get(f"wc/v3/orders/{order_id}")
+        order_data = order_response.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None # Заказ не найден
+        logger.error(f"Failed to fetch order details for order ID {order_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch order details from WooCommerce.")
+
+    # 2. Получаем и формируем информацию о клиенте
+    customer_wp_id = order_data.get("customer_id")
+    customer_info: AdminOrderCustomerInfo
+    
+    if customer_wp_id and customer_wp_id > 0:
+        user = crud_user.get_user_by_wordpress_id(db, customer_wp_id)
+        if user:
+            display_name = user.first_name or user.username or f"User #{user.id}"
+            customer_info = AdminOrderCustomerInfo(
+                user_id=user.id,
+                wordpress_id=user.wordpress_id,
+                telegram_id=user.telegram_id,
+                display_name=display_name,
+                email=order_data.get("billing", {}).get("email"),
+                phone=order_data.get("billing", {}).get("phone")
+            )
+        else:
+            customer_info = AdminOrderCustomerInfo(
+                user_id=None, wordpress_id=customer_wp_id, telegram_id=None,
+                display_name=f"{order_data.get('billing', {}).get('first_name')} {order_data.get('billing', {}).get('last_name')}".strip(),
+                email=order_data.get("billing", {}).get("email"),
+                phone=order_data.get("billing", {}).get("phone")
+            )
+    else:
+        customer_info = AdminOrderCustomerInfo(
+            user_id=None, wordpress_id=0, telegram_id=None,
+            display_name=f"Гость ({order_data.get('billing', {}).get('first_name')})",
+            email=order_data.get("billing", {}).get("email"),
+            phone=order_data.get("billing", {}).get("phone")
+        )
+
+    # 3. Обогащаем line_items изображениями товаров
+    all_product_ids = {item.get('product_id') for item in order_data.get("line_items", []) if item.get('product_id')}
+    product_details_map = {}
+    if all_product_ids:
+        for product_id in all_product_ids:
+            product_data_wc = await catalog_service._get_any_product_by_id_from_wc(product_id)
+            if product_data_wc and product_data_wc.get("images"):
+                product_details_map[product_id] = product_data_wc["images"][0].get("src")
+
+    for item in order_data.get("line_items", []):
+        item['image_url'] = product_details_map.get(item.get('product_id'))
+
+    # 4. Получаем заметки к заказу
+    try:
+        notes_response = await wc_client.get(f"wc/v3/orders/{order_id}/notes")
+        order_notes_data = notes_response.json()
+        order_data["notes"] = order_notes_data
+    except Exception:
+        logger.warning(f"Could not fetch notes for order {order_id}")
+        order_data["notes"] = []
+
+    # 5. Собираем и валидируем итоговый объект
+    order_data["customer_info"] = customer_info
+    
+    try:
+        return AdminOrderDetails.model_validate(order_data)
+    except Exception as e:
+        logger.error(f"Failed to validate final order data for order ID {order_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to parse enriched order data.")
+
+async def update_order_status(order_id: int, new_status: str) -> Order:
+    """Обновляет статус заказа в WooCommerce."""
+    try:
+        payload = {"status": new_status}
+        response_data = await wc_client.post(f"wc/v3/orders/{order_id}", json=payload)
+        # Возвращаем Pydantic-модель, чтобы FastAPI мог ее валидировать
+        return Order.model_validate(response_data)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Order with ID {order_id} not found in WooCommerce.")
+        logger.error(f"Error updating order {order_id} status in WooCommerce.", exc_info=True)
+        raise HTTPException(status_code=e.response.status_code, detail=f"WooCommerce error: {e.response.text}")
+
+async def create_order_note(order_id: int, note_text: str):
+    """Создает приватную заметку для заказа в WooCommerce."""
+    try:
+        payload = {
+            "note": note_text,
+            "customer_note": False # False делает заметку приватной (только для админов)
+        }
+        await wc_client.post(f"wc/v3/orders/{order_id}/notes", json=payload)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Order with ID {order_id} not found in WooCommerce.")
+        logger.error(f"Error creating note for order {order_id} in WooCommerce.", exc_info=True)
+        raise HTTPException(status_code=e.response.status_code, detail=f"WooCommerce error: {e.response.text}")

@@ -8,8 +8,11 @@ services:
     restart: always
     env_file:
       - .env # Подключаем наши переменные окружения
-    volumes:
-      - ./app.log:/app/app.log # Пробрасываем файл лога на хост
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"  # Максимальный размер файла лога
+        max-file: "5"  
     depends_on:
       - postgres_db
       - redis_cache

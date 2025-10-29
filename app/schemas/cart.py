@@ -1,17 +1,19 @@
 # app/schemas/cart.py
 from pydantic import BaseModel, Field
-from typing import List
-from .product import Product  # Импортируем схему Product для детального ответа
+from typing import List, Optional
+from .product import Product, ProductVariationSchema  # Импортируем схему Product для детального ответа
 
 # Схема для добавления/обновления товара в корзине
 class CartItemUpdate(BaseModel):
     product_id: int
     quantity: int = Field(1, gt=0) # Количество должно быть больше 0
-
+    variation_id: Optional[int] = None
+    
 # Схема для одного элемента в ответе о содержимом корзины
 class CartItemResponse(BaseModel):
     product: Product  # Полная информация о товаре
     quantity: int
+    variation: Optional[ProductVariationSchema] = None
 
 class CartStatusNotification(BaseModel):
     level: str  # e.g., "warning", "error"

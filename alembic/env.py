@@ -10,7 +10,6 @@ from sqlalchemy import engine_from_config
 from sqlalchemy.pool import NullPool
 from alembic import context
 
-# --- НАШИ ИЗМЕНЕНИЯ ---
 
 # 1. Импортируем наш объект настроек, который умеет читать .env
 from app.core.config import settings
@@ -23,11 +22,11 @@ from app.models.loyalty import LoyaltyTransaction
 from app.models.referral import Referral
 from app.models.broadcast import Broadcast
 from app.models.notification import Notification
-
+from app.models.channel_post import ChannelPost
+from app.models.dialogue import Dialogue, DialogueMessage
 # 4. Указываем Alembic на метаданные наших моделей
 target_metadata = Base.metadata
 
-# --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 config = context.config
 
@@ -37,7 +36,6 @@ if config.config_file_name is not None:
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
-    # Используем наш settings объект для получения URL
     url = settings.DATABASE_URL
     context.configure(
         url=url,
@@ -53,16 +51,11 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
 
-    # --- ОКОНЧАТЕЛЬНОЕ ИСПРАВЛЕНИЕ ---
-    # Мы не будем ничего брать из объекта 'config'.
-    # Вместо этого, создадим словарь для engine_from_config вручную,
-    # используя наш надежный объект 'settings'.
     connectable = engine_from_config(
-        {"sqlalchemy.url": settings.DATABASE_URL}, # <--- Ключевое изменение
+        {"sqlalchemy.url": settings.DATABASE_URL}, 
         prefix="sqlalchemy.",
         poolclass=NullPool,
     )
-    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
     with connectable.connect() as connection:
         context.configure(
