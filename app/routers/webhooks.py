@@ -230,7 +230,7 @@ async def order_updated_webhook(
         # --- Логика отправки уведомлений о статусе ---
         # Отправляем уведомление, только если это НЕ первичное событие создания заказа
         # И если статус не является техническим ('checkout-draft')
-        if not is_just_created_webhook and order_status != 'checkout-draft':
+        if not is_just_created_webhook and order_status not in IGNORED_ORDER_STATUSES_FOR_USER_NOTIFICATION:
             status_title = ORDER_STATUS_MAP.get(order_status, order_status.capitalize())
             # Уведомление в бот
             await bot_notification_service.send_order_status_update(db, user, order_id, status_title)
