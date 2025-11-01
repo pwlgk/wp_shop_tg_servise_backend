@@ -8,7 +8,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
-
+from fastapi import Request
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.user import User
@@ -50,6 +50,7 @@ def get_db_context() -> Iterator[Session]:
 # --- Зависимости аутентификации и авторизации ---
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(strict_bearer_scheme), 
     db: Session = Depends(get_db)
 ) -> User:
@@ -82,12 +83,13 @@ def get_current_user(
     if user is None:
         logger.warning(f"User with ID {user_id} from token not found in DB.")
         raise credentials_exception
-    
+    request.state.user = user
     logger.info(f"Successfully authenticated user ID: {user.id} (TG ID: {user.telegram_id})")
     return user
 
 
 def get_optional_current_user(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_bearer_scheme),
     db: Session = Depends(get_db)
 ) -> Optional[User]:
@@ -114,6 +116,7 @@ def get_optional_current_user(
         return None
     
     user = db.query(User).filter(User.id == int(user_id)).first()
+    request.state.user = user
     if user:
         logger.info(f"Successfully authenticated optional user ID: {user.id} (TG ID: {user.telegram_id})")
     else:
