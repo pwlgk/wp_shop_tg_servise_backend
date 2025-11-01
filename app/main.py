@@ -1,7 +1,6 @@
 # app/main.py
 
 import asyncio
-import os
 import traceback
 import logging
 from contextlib import asynccontextmanager
@@ -9,7 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from app.core.limiter import limiter, key_func 
 # Конфигурация и ядро
 from app.core.config import settings as config
 from app.core.logging_config import setup_logging
@@ -132,6 +134,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
+
 origins = [
     "http://localhost",
     "http://localhost:3000", # для React/Vue
@@ -149,6 +153,20 @@ app.add_middleware(
     allow_headers=["*"],    # Разрешить все заголовки
 )
 
+# --- ИНТЕГРАЦИЯ SLOWAPI ---
+
+# 1. Добавляем экземпляр лимитера в состояние приложения.
+#    Это нужно, чтобы обработчик ошибок и middleware имели к нему доступ.
+app.state.limiter = limiter
+
+# 2. Добавляем обработчик исключений, который будет срабатывать при превышении лимита.
+#    Он вернет стандартный ответ 429 Too Many Requests.
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# 3. Добавляем middleware. Он будет перехватывать все запросы.
+#    ВАЖНО: Это middleware должно быть одним из первых, чтобы оно обрабатывало
+#    запросы до того, как они дойдут до ресурсоемкой логики.
+app.add_middleware(SlowAPIMiddleware)
 
 # --- Регистрация обработчика исключений ---
 app.add_exception_handler(Exception, unhandled_exception_handler)

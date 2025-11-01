@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.schemas.user import TelegramLoginData, Token
 from app.services.auth import authenticate_telegram_user, get_db
-
+from app.core.limiter import limiter
 router = APIRouter()
 
 @router.get("/")
@@ -11,7 +11,7 @@ def read_root():
     return {"status": "ok"}
 
 
-@router.post("/auth/telegram", response_model=Token)
+@router.post("/auth/telegram", response_model=Token, dependencies=[Depends(limiter.limit("5/minute"))])
 async def login_via_telegram(
     login_data: TelegramLoginData,
     db: Session = Depends(get_db)
