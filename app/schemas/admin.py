@@ -211,10 +211,6 @@ class DialogueReplyRequest(BaseModel):
     text: str = Field(..., min_length=1)
 
 
-class CleanupTaskRequest(BaseModel):
-    older_than_days: int = Field(..., gt=0, description="Удалить файлы старше указанного количества дней.")
-
-
 
 class TaskInfo(BaseModel):
     """Описание одной фоновой задачи."""

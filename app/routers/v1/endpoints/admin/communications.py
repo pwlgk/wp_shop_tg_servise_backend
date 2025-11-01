@@ -15,14 +15,12 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 # Импортируем зависимости и модели
-from app.dependencies import get_db, get_admin_user
-from app.models.user import User
+from app.dependencies import get_db
 from app.models.broadcast import Broadcast
 from app.models.channel_post import ChannelPost
 
 # Импортируем все необходимые схемы
 from app.schemas.admin import (
-    BroadcastCreate,
     BroadcastDetails,
     PaginatedAdminBroadcasts,
     ChannelPostCreate,
@@ -30,17 +28,14 @@ from app.schemas.admin import (
     PaginatedAdminChannelPosts,
     ChannelPostButton,
 )
-from app.core.config import settings
 
 # Импортируем сервисы и фоновые задачи
 from app.bot.services.broadcast import process_broadcast, retract_broadcast
 from app.services import channel_publisher as channel_service, storage as storage_service
 
-
 logger = logging.getLogger(__name__)
 
 # Создаем роутер для этого модуля.
-# Префиксы будут добавлены на уровне выше в admin/__init__.py
 router = APIRouter()
 
 
@@ -58,34 +53,41 @@ async def create_broadcast(
     scheduled_at: Optional[datetime] = Form(None),
 ):
     """
-    [АДМИН] Создает и запускает (возможно, отложенно) задачу на рассылку.
+    [АДМИН] Создает рассылку, временно сохраняя файл локально для отправки.
     """
-    image_url_from_s3 = None
-    if photo_file:
-        try:
-            image_url_from_s3 = await storage_service.upload_file_to_s3(
-                file=photo_file, 
-                bucket_name=settings.S3_BUCKET_NAME
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to upload image: {e}")
+    local_photo_path = None
+    try:
+        if photo_file:
+            # Сохраняем файл во временную директорию
+            local_photo_path = await storage_service.save_temp_file(photo_file)
+            # Добавляем задачу на очистку файла ПОСЛЕ того, как рассылка будет обработана
+            background_tasks.add_task(storage_service.cleanup_temp_file, local_photo_path)
 
-    new_broadcast = Broadcast(
-        message_text=message_text,
-        target_level=target_level,
-        image_url=image_url_from_s3,
-        button_text=button_text,
-        button_url=button_url,
-        scheduled_at=scheduled_at,
-        status="scheduled" if scheduled_at else "pending",
-    )
-    db.add(new_broadcast)
-    db.commit()
-    db.refresh(new_broadcast)
-    
-    background_tasks.add_task(process_broadcast, broadcast_id=new_broadcast.id)
-    
-    return new_broadcast
+        new_broadcast = Broadcast(
+            message_text=message_text,
+            target_level=target_level,
+            # ВАЖНО: В БД сохраняем локальный путь к файлу
+            image_url=local_photo_path, 
+            button_text=button_text,
+            button_url=button_url,
+            scheduled_at=scheduled_at,
+            status="scheduled" if scheduled_at else "pending",
+        )
+        db.add(new_broadcast)
+        db.commit()
+        db.refresh(new_broadcast)
+        
+        # Запускаем фоновую задачу, которая будет использовать локальный путь
+        background_tasks.add_task(process_broadcast, broadcast_id=new_broadcast.id)
+        
+        return new_broadcast
+    except Exception as e:
+        # Если произошла ошибка (например, при сохранении файла),
+        # и файл успел создаться, удаляем его, чтобы не оставлять мусор.
+        if local_photo_path:
+            await storage_service.cleanup_temp_file(local_photo_path)
+        # Перевыбрасываем исходное исключение
+        raise e
 
 
 @router.get("/broadcasts", response_model=PaginatedAdminBroadcasts)
@@ -160,36 +162,44 @@ async def create_channel_post(
     button: Optional[str] = Form(None),
 ):
     """
-    [АДМИН] Публикует новый пост в Telegram-канал.
+    [АДМИН] Публикует пост в Telegram-канал, временно сохраняя медиафайлы локально.
     """
-    uploaded_media_urls = []
-    if media_files:
-        if len(media_files) > 10:
-            raise HTTPException(status_code=400, detail="Cannot upload more than 10 media files.")
-        
-        upload_tasks = [storage_service.upload_file_to_s3(file, settings.S3_BUCKET_NAME) for file in media_files]
-        try:
-            uploaded_media_urls = await asyncio.gather(*upload_tasks)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to upload one or more files: {e}")
-
-    parsed_button: Optional[ChannelPostButton] = None
-    if button:
-        try:
-            button_data = json.loads(button)
-            if "type" not in button_data and "url" in button_data:
-                button_data["type"] = "web_app" if button_data["url"].startswith('/') else "external"
-            parsed_button = ChannelPostButton.model_validate(button_data)
-        except (json.JSONDecodeError, Exception) as e:
-            raise HTTPException(status_code=400, detail=f"Invalid format for 'button'. Error: {e}")
-
-    post_data = ChannelPostCreate(title=title, message_text=message_text, button=parsed_button)
-
+    local_media_paths = []
     try:
-        new_post = await channel_service.publish_post_to_channel(db=db, post_data=post_data, media_urls=uploaded_media_urls)
+        # 1. Сохраняем все файлы во временную директорию
+        if media_files:
+            if len(media_files) > 10:
+                raise HTTPException(status_code=400, detail="Cannot upload more than 10 media files.")
+            
+            save_tasks = [storage_service.save_temp_file(file) for file in media_files]
+            local_media_paths = await asyncio.gather(*save_tasks)
+
+        # 2. Парсим данные кнопки из JSON-строки
+        parsed_button: Optional[ChannelPostButton] = None
+        if button:
+            try:
+                button_data = json.loads(button)
+                if "type" not in button_data and "url" in button_data:
+                    button_data["type"] = "web_app" if button_data["url"].startswith('/') else "external"
+                parsed_button = ChannelPostButton.model_validate(button_data)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid format for 'button'. Error: {e}")
+
+        # 3. Формируем DTO и вызываем сервис
+        post_data = ChannelPostCreate(title=title, message_text=message_text, button=parsed_button)
+
+        new_post = await channel_service.publish_post_to_channel(
+            db=db, 
+            post_data=post_data,
+            media_paths=local_media_paths 
+        )
         return new_post
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        # 4. Гарантированно очищаем временные файлы после завершения запроса
+        if local_media_paths:
+            cleanup_tasks = [storage_service.cleanup_temp_file(path) for path in local_media_paths]
+            await asyncio.gather(*cleanup_tasks)
 
 
 @router.get("/channel/posts", response_model=PaginatedAdminChannelPosts)

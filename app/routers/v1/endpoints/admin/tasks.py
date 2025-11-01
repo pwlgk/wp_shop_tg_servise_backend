@@ -12,10 +12,10 @@ from app.db.session import SessionLocal
 from app.models.user import User
 
 # Импортируем схемы, связанные с задачами
-from app.schemas.admin import TaskInfo, TaskRunRequest, CleanupTaskRequest
+from app.schemas.admin import TaskInfo, TaskRunRequest
 
 # Импортируем реестр задач и конкретные функции-обертки
-from app.tasks_registry import TASKS, get_tasks_list, run_cleanup_s3
+from app.tasks_registry import TASKS, get_tasks_list
 
 logger = logging.getLogger(__name__)
 
@@ -66,32 +66,3 @@ async def run_task_endpoint(
 
     return {"status": "accepted", "message": message}
 
-
-@router.post("/run/cleanup-s3", status_code=status.HTTP_202_ACCEPTED)
-async def run_cleanup_s3_task_endpoint(
-    request_data: CleanupTaskRequest,
-    background_tasks: BackgroundTasks,
-    admin_user: User = Depends(get_admin_user) # Зависимость для получения ID админа
-):
-    """
-    [АДМИН] Запускает фоновую задачу по очистке старых медиафайлов в S3-хранилище.
-    Требует указания количества дней.
-    """
-    # ВАЖНО: Создаем новую, независимую сессию БД специально для фоновой задачи.
-    # Это предотвращает проблемы, связанные с закрытием сессии основного запроса.
-    db_session = SessionLocal()
-    
-    background_tasks.add_task(
-        run_cleanup_s3,
-        db_session=db_session,
-        older_than_days=request_data.older_than_days,
-        admin_user_id=admin_user.telegram_id
-    )
-    
-    message = (
-        f"Task to clean up files older than {request_data.older_than_days} days has been started. "
-        f"A report will be sent to you in Telegram upon completion."
-    )
-    logger.info(f"S3 cleanup task triggered by admin {admin_user.id} for files older than {request_data.older_than_days} days.")
-    
-    return {"status": "accepted", "message": message}

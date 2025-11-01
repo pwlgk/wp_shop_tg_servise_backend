@@ -7,9 +7,7 @@ from app.services import (
     notification_cleanup,
     birthday_greeter,
     customer_engagement,
-    user_updater,
-    storage as storage_service # Импортируем наш новый сервис
-)
+    user_updater,)
 from app.db.session import SessionLocal
 from sqlalchemy.orm import Session
 
@@ -44,13 +42,6 @@ async def run_reactivate_sleeping_users():
 async def run_update_all_usernames():
     await user_updater.update_all_usernames_task()
 
-async def run_cleanup_s3(db_session: Session, older_than_days: int, admin_user_id: int):
-    # Убедимся, что передана валидная сессия
-    await storage_service.cleanup_s3_storage_task(
-        db=db_session,
-        older_than_days=older_than_days,
-        admin_user_id=admin_user_id
-    )
 
 
 # --- Словарь-реестр всех задач, доступных для ручного запуска ---
